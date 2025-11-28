@@ -400,7 +400,7 @@ int bt_auto_pair_device(const char *device_mac) {
     // Scan for the device
     INFO_PRINT("Scanning for device...");
     snprintf(cmd, sizeof(cmd), 
-        "timeout 10 bash -c \"echo -e 'scan on\\n' | bluetoothctl & sleep 8; pkill -P $! bluetoothctl\" 2>&1");
+        "timeout 10 bash -c \"echo -e 'scan on\\n' | bluetoothctl & sleep 8; killall bluetoothctl\" 2>&1");
     system(cmd);
     
     // Remove device if already paired (for clean pairing)
