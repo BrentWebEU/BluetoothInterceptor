@@ -94,13 +94,25 @@ npx react-native run-ios
 
 ## Usage Guide
 
-### Step 1: Prepare Target Environment
+### Quick Start (Fully Automated)
 
-1. Identify target device MAC address (headphones)
-2. Identify source device MAC address (phone)
-3. Ensure Pi is on same network as mobile device
+```bash
+sudo ./bt_interceptor -S
+```
 
-### Step 2: Run Interceptor on Raspberry Pi
+**The interceptor will automatically:**
+1. Scan for nearby Bluetooth devices
+2. Show you a list with connection status
+3. Let you select source (phone) and target (headphones)
+4. **Break any existing connections** to the target device
+5. Pair with the target device automatically
+6. Extract encryption keys
+7. Set up the MITM relay
+8. Begin intercepting traffic
+
+### Manual Mode (Advanced)
+
+If you already know the MAC addresses:
 
 ```bash
 sudo ./bt_interceptor -s AA:BB:CC:DD:EE:FF -t 11:22:33:44:55:66
@@ -111,19 +123,13 @@ Where:
 - `-t` = Target MAC (headphones to intercept)
 - `-p` = PSM (default: 25 for A2DP)
 - `-P` = TCP port (default: 8888)
+- `-S` = Enable scanning mode
 
-### Step 3: Pair Devices
+The interceptor will still automatically detect and break existing connections.
 
-When prompted, use `bluetoothctl` to pair with target:
+### Step 3: Connect Mobile App (Optional)
 
-```bash
-bluetoothctl
-scan on
-pair 11:22:33:44:55:66
-connect 11:22:33:44:55:66
-```
-
-### Step 4: Connect Mobile App
+The mobile app is optional but provides real-time monitoring:
 
 1. Launch the mobile app
 2. Enter Pi's IP address (e.g., `192.168.1.100`)
@@ -131,36 +137,74 @@ connect 11:22:33:44:55:66
 4. Tap "Connect"
 5. Monitor intercepted audio stream
 
-### Step 5: Establish Connection
+### Step 4: Source Device Connects
 
-The interceptor will:
-1. Wait for source device (phone) to connect
-2. Automatically connect to target device (headphones)
-3. Begin relaying traffic and streaming to mobile app
+On your phone:
+1. Go to Bluetooth settings
+2. Connect to "headphones" (actually the Pi)
+3. Play audio
+4. Audio flows: Phone → Pi (decrypted) → Headphones (re-encrypted)
+5. Mobile app receives decrypted stream in real-time
+
+## New Features (v2.0)
+
+### 🎯 Automatic Device Scanning
+- Discovers all nearby Bluetooth devices
+- Shows device names and MAC addresses
+- Displays connection status (Connected/Available)
+- Interactive selection menu
+
+### 🔓 Automatic Pairing
+- No manual `bluetoothctl` commands needed
+- Automatic trust and connection
+- Falls back to manual mode if needed
+- Progress tracking and status updates
+
+### 💥 Force Disconnect
+- **Detects existing connections** between devices
+- **Automatically breaks connections** using 4 methods:
+  1. Polite disconnect (bluetoothctl)
+  2. Pairing removal (forced disconnect)
+  3. HCI-level disconnect (hcitool)
+  4. RF jamming guidance (hardware)
+- Works on **actively connected** devices
+- True active MITM capability
+
+See detailed documentation:
+- [DEVICE_SCANNING.md](DEVICE_SCANNING.md) - Device discovery details
+- [AUTO_PAIRING.md](AUTO_PAIRING.md) - Automatic pairing implementation
+- [FORCE_DISCONNECT.md](FORCE_DISCONNECT.md) - Connection breaking techniques
 
 ## MITM Attack Strategy
 
-This system implements a classic Bluetooth MITM attack:
+This system implements a **fully automated active MITM attack**:
 
-### Attack Steps
+### Attack Steps (Automated)
 
-1. **Jamming/Disconnection**
-   - Target device (headphones) must be disconnected from source (phone)
-   - Can be done manually or with RF jamming (not included)
+1. **Device Discovery**
+   - Scan for all nearby Bluetooth devices
+   - Identify source (phone) and target (headphones)
+   - Check connection status
 
-2. **MAC Spoofing**
+2. **Connection Breaking** ⚡ **NEW**
+   - Detect if target is already connected
+   - Force disconnect using multiple methods
+   - Ensure target is available for MITM
+
+3. **MAC Spoofing**
    - Pi changes its MAC to match source device
    - Uses `bdaddr` tool or kernel patches
 
-3. **Forced Pairing**
+4. **Automated Pairing** ⚡ **NEW**
    - Pi pairs with target as "fake" source
-   - Legitimate pairing process generates link key
+   - Automatic trust and connection
+   - No manual bluetoothctl commands needed
 
-4. **Key Extraction**
+5. **Key Extraction**
    - BlueZ stores link key in `/var/lib/bluetooth/`
    - Interceptor extracts key from `info` file
 
-5. **Transparent Relay**
+6. **Transparent Relay**
    - Accepts connection from real source device
    - Connects to target device
    - Relays traffic bidirectionally

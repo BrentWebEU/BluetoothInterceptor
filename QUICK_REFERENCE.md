@@ -1,6 +1,19 @@
 # Quick Reference Card
 
-## Raspberry Pi Commands
+## 🚀 Fastest Way to Start
+
+```bash
+sudo ./bt_interceptor -S
+```
+
+**That's it!** Everything else is automatic:
+- Scans for devices
+- Shows connection status  
+- Breaks existing connections
+- Pairs automatically
+- Sets up MITM
+
+## Command Reference
 
 ### Build Interceptor
 ```bash
@@ -9,7 +22,12 @@ make
 sudo make install  # Optional: system-wide install
 ```
 
-### Run Interceptor
+### Interactive Mode (Recommended)
+```bash
+sudo ./bt_interceptor -S
+```
+
+### Manual Mode (If you know MAC addresses)
 ```bash
 sudo ./bt_interceptor -s <SOURCE_MAC> -t <TARGET_MAC>
 ```
@@ -19,7 +37,7 @@ Example:
 sudo ./bt_interceptor -s AA:BB:CC:DD:EE:FF -t 11:22:33:44:55:66 -P 8888
 ```
 
-### Pair with Device
+### Manual Pairing (Only if auto-pairing fails)
 ```bash
 sudo bluetoothctl
 scan on

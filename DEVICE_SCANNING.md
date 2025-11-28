@@ -1,8 +1,11 @@
-# Device Scanning Feature
+# Device Scanning and Auto-Pairing Feature
 
 ## Overview
 
-The interceptor now supports automatic Bluetooth device discovery, allowing you to scan for nearby devices and select them interactively instead of manually finding MAC addresses.
+The interceptor now supports:
+1. **Automatic Bluetooth device discovery** - Scan for nearby devices and see their MAC addresses and names
+2. **Interactive device selection** - Choose devices from a visual list instead of typing MAC addresses
+3. **Automatic pairing** - No need to manually run bluetoothctl commands; pairing happens automatically
 
 ## What Was Added
 
@@ -18,7 +21,23 @@ Scans for nearby Bluetooth devices using HCI inquiry and returns a list with:
 int bt_scan_devices(bt_device_t *devices, int max_devices, int scan_duration);
 ```
 
-### 2. New Data Structure: `bt_device_t`
+### 2. New Function: `bt_auto_pair_device()`
+**Location:** `interceptor/bt_utils.c`
+
+Automatically pairs with a target Bluetooth device by:
+- Powering on the Bluetooth adapter
+- Scanning for the target device
+- Removing existing pairing (if any)
+- Initiating pairing
+- Trusting the device
+- Attempting connection
+- Waiting for BlueZ to write pairing information
+
+```c
+int bt_auto_pair_device(const char *device_mac);
+```
+
+### 3. New Data Structure: `bt_device_t`
 **Location:** `interceptor/bt_utils.h`
 
 ```c
@@ -29,13 +48,13 @@ typedef struct {
 } bt_device_t;
 ```
 
-### 3. Interactive Selection Functions
+### 4. Interactive Selection Functions
 **Location:** `interceptor/main.c`
 
 - `display_devices()` - Shows formatted table of discovered devices
 - `select_device()` - Prompts user to select a device from the list
 
-### 4. New Command Line Option
+### 5. New Command Line Option
 **Option:** `-S` - Scan mode
 
 When enabled, the interceptor will:
@@ -43,11 +62,12 @@ When enabled, the interceptor will:
 2. Display all found devices in a formatted table
 3. Prompt for source device selection
 4. Prompt for target device selection
-5. Optionally rescan if devices not found
+5. Automatically pair with the target device
+6. Optionally rescan if devices not found
 
 ## Usage Examples
 
-### Example 1: Full Interactive Mode
+### Example 1: Full Interactive Mode with Auto-Pairing
 
 ```bash
 sudo ./bt_interceptor -S
@@ -74,7 +94,27 @@ Select target device (headphones) (1-5, 0 to rescan): 2
 [INFO] Bluetooth MITM Interceptor
 [INFO] Source (phone): AA:BB:CC:DD:EE:FF
 [INFO] Target (headset): 11:22:33:44:55:66
-...
+[INFO] PSM: 25
+[INFO] TCP Port: 8888
+[INFO] Adapter address: XX:XX:XX:XX:XX:XX
+[INFO] Step 1: Spoofing MAC address...
+[INFO] Step 2: Auto-pairing with target device
+[INFO] Ensure target device 11:22:33:44:55:66 is in pairing mode
+[INFO] Auto-pairing will begin in 3 seconds...
+[INFO] Attempting to pair with device: 11:22:33:44:55:66
+[INFO] Powering on Bluetooth adapter...
+[INFO] Scanning for device...
+[INFO] Pairing with device...
+[INFO] Pairing successful
+[INFO] Trusting device...
+[INFO] Connecting to device...
+[INFO] Connection successful
+[INFO] Auto-pairing completed
+[INFO] Link key extracted: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+[INFO] Step 3: Creating TCP server
+[INFO] TCP server listening on port 8888
+[INFO] Step 4: Setting up Bluetooth relay
+[INFO] Waiting for phone to connect...
 ```
 
 ### Example 2: Scan with Partial Override
@@ -91,7 +131,40 @@ This will scan for source device but use the specified target MAC address.
 sudo ./bt_interceptor -s AA:BB:CC:DD:EE:FF -t 11:22:33:44:55:66
 ```
 
-No scanning, directly uses provided MAC addresses.
+Even in manual mode, pairing is now automatic - no need to manually run bluetoothctl.
+
+## Automatic Pairing Details
+
+### What Happens During Auto-Pairing
+
+The `bt_auto_pair_device()` function performs the following steps automatically:
+
+1. **Check Existing Pairing** - Verifies if device is already paired
+2. **Power On Adapter** - Ensures Bluetooth adapter is powered on
+3. **Enable Discoverability** - Makes the adapter visible to other devices
+4. **Scan for Target** - Searches for the target device (8 second scan)
+5. **Remove Old Pairing** - Cleans up any existing pairing for fresh start
+6. **Initiate Pairing** - Sends pairing request to target device
+7. **Trust Device** - Marks device as trusted in BlueZ
+8. **Connect** - Attempts to establish connection
+9. **Wait for BlueZ** - Gives BlueZ time to write pairing info to disk
+
+### Requirements for Auto-Pairing
+
+For auto-pairing to work:
+- ✅ Target device must be in **pairing mode** (discoverable)
+- ✅ Target device must accept the pairing request
+- ✅ `bluetoothctl` must be installed and accessible
+- ✅ Must run with root/sudo privileges
+- ✅ BlueZ Bluetooth stack must be running
+
+### Fallback to Manual Pairing
+
+If auto-pairing fails, the interceptor will:
+1. Display error message
+2. Show manual pairing instructions
+3. Wait for you to complete pairing manually
+4. Continue once you press Enter
 
 ## Technical Details
 
@@ -140,13 +213,16 @@ make
 3. **Fewer errors** - Less chance of typos in MAC addresses
 4. **Device discovery** - See all nearby Bluetooth devices at once
 5. **Flexibility** - Can rescan if target devices not found initially
+6. **Fully automated** - Pairing happens automatically without manual bluetoothctl commands
+7. **Error recovery** - Falls back to manual pairing if auto-pairing fails
 
 ## Network Check Reminder
 
 After selecting devices, ensure:
 - ✅ Raspberry Pi is on same network as mobile device (for TCP streaming)
 - ✅ Source device (phone) is unpaired from target device (headphones)
-- ✅ Target device (headphones) is in pairing mode or previously paired with Pi
+- ✅ Target device (headphones) is in **pairing mode** before starting
+- ✅ You have root/sudo privileges to run the interceptor
 
 ## Future Enhancements
 

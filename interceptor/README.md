@@ -6,6 +6,8 @@ A C application for Raspberry Pi that performs Bluetooth MITM attacks to interce
 
 - L2CAP socket handling for Bluetooth connections
 - MAC address spoofing support
+- **Automatic Bluetooth pairing** via bluetoothctl
+- Interactive device scanning and selection
 - Link key extraction from BlueZ pairing data
 - Real-time TCP streaming server for decrypted audio
 - Multi-socket relay with select() event loop
@@ -100,7 +102,12 @@ sudo ./bt_interceptor -S -t 11:22:33:44:55:66
 ### Flow
 
 1. Spoof MAC address to match source device
-2. Pair with target device (manual step via bluetoothctl)
+2. **Automatically pair with target device** using bluetoothctl
+   - Powers on adapter
+   - Scans for device
+   - Initiates pairing
+   - Trusts device
+   - Attempts connection
 3. Extract link key from `/var/lib/bluetooth/`
 4. Initialize crypto module with link key
 5. Start TCP server for streaming
@@ -131,6 +138,7 @@ This interceptor implements an active MITM attack:
 - Single connection relay (no multi-target support)
 - A2DP profile assumed (PSM 25)
 - Requires root privileges for Bluetooth operations
+- Auto-pairing requires target device to be in pairing mode
 
 ## TODO
 
@@ -140,7 +148,8 @@ This interceptor implements an active MITM attack:
 - [ ] Dynamic PSM detection and profile switching
 - [ ] Packet capture/logging functionality
 - [ ] Support for HCI raw sockets and monitor mode
-- [ ] Automated pairing process
+- [x] Automated pairing process
+- [x] Interactive device scanning
 - [ ] Web interface for monitoring
 
 ## License
