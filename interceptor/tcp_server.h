@@ -2,6 +2,7 @@
 #define TCP_SERVER_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 int tcp_create_server(uint16_t port);
 int tcp_accept_client(int server_sock);

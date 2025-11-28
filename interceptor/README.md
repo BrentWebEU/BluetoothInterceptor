@@ -37,7 +37,24 @@ make
 
 ## Usage
 
-### Basic Usage
+### Interactive Mode (Recommended)
+
+Scan for nearby devices and select them interactively:
+
+```bash
+sudo ./bt_interceptor -S
+```
+
+The interceptor will:
+1. Scan for nearby Bluetooth devices (8 seconds)
+2. Display a list of found devices with MAC addresses and names
+3. Prompt you to select the source device (phone)
+4. Prompt you to select the target device (headphones)
+5. Begin the MITM attack
+
+### Manual Mode
+
+Specify MAC addresses directly:
 
 ```bash
 sudo ./bt_interceptor -s <phone_mac> -t <headset_mac>
@@ -45,16 +62,29 @@ sudo ./bt_interceptor -s <phone_mac> -t <headset_mac>
 
 ### Options
 
+- `-S` - Scan for nearby devices and select interactively
 - `-s <source_mac>` - Source device MAC address (phone)
 - `-t <target_mac>` - Target device MAC address (headphones)
 - `-p <psm>` - L2CAP PSM (default: 25 for A2DP)
 - `-P <port>` - TCP server port (default: 8888)
 - `-h` - Show help
 
-### Example
+### Examples
 
+**Interactive scanning:**
+```bash
+sudo ./bt_interceptor -S
+```
+
+**Manual MAC addresses:**
 ```bash
 sudo ./bt_interceptor -s AA:BB:CC:DD:EE:FF -t 11:22:33:44:55:66 -P 9000
+```
+
+**Scan and override one MAC:**
+```bash
+sudo ./bt_interceptor -S -t 11:22:33:44:55:66
+# Will scan for source device, use specified target
 ```
 
 ## Architecture

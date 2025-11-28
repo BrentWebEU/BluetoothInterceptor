@@ -24,7 +24,43 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  -t <target_mac>    Target device MAC address (headphones)\n");
     fprintf(stderr, "  -p <psm>           L2CAP PSM (default: 25 for A2DP)\n");
     fprintf(stderr, "  -P <port>          TCP server port (default: %d)\n", TCP_SERVER_PORT);
+    fprintf(stderr, "  -S                 Scan for nearby Bluetooth devices\n");
     fprintf(stderr, "  -h                 Show this help\n");
+}
+
+void display_devices(bt_device_t *devices, int count) {
+    printf("\n");
+    printf("═══════════════════════════════════════════════════════════════════════\n");
+    printf("  #  │  MAC Address       │  Device Name\n");
+    printf("═══════════════════════════════════════════════════════════════════════\n");
+    for (int i = 0; i < count; i++) {
+        printf(" %2d  │  %s  │  %s\n", i + 1, devices[i].addr, devices[i].name);
+    }
+    printf("═══════════════════════════════════════════════════════════════════════\n");
+    printf("\n");
+}
+
+char* select_device(bt_device_t *devices, int count, const char *prompt) {
+    int choice;
+    while (1) {
+        printf("%s (1-%d, 0 to rescan): ", prompt, count);
+        if (scanf("%d", &choice) != 1) {
+            while (getchar() != '\n');
+            printf("Invalid input. Please enter a number.\n");
+            continue;
+        }
+        while (getchar() != '\n');
+        
+        if (choice == 0) {
+            return NULL;
+        }
+        
+        if (choice >= 1 && choice <= count) {
+            return devices[choice - 1].addr;
+        }
+        
+        printf("Invalid choice. Please select a number between 1 and %d.\n", count);
+    }
 }
 
 int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client) {
@@ -141,9 +177,10 @@ int main(int argc, char *argv[]) {
     char *target_mac = NULL;
     uint16_t psm = 25;
     uint16_t tcp_port = TCP_SERVER_PORT;
+    int scan_mode = 0;
     
     int opt;
-    while ((opt = getopt(argc, argv, "s:t:p:P:h")) != -1) {
+    while ((opt = getopt(argc, argv, "s:t:p:P:Sh")) != -1) {
         switch (opt) {
             case 's':
                 source_mac = optarg;
@@ -157,12 +194,53 @@ int main(int argc, char *argv[]) {
             case 'P':
                 tcp_port = atoi(optarg);
                 break;
+            case 'S':
+                scan_mode = 1;
+                break;
             case 'h':
                 print_usage(argv[0]);
                 return 0;
             default:
                 print_usage(argv[0]);
                 return 1;
+        }
+    }
+    
+    // Interactive device selection if MAC addresses not provided
+    if (!source_mac || !target_mac || scan_mode) {
+        bt_device_t devices[50];
+        int device_count;
+        char source_selected[18] = {0};
+        char target_selected[18] = {0};
+        
+        while (1) {
+            device_count = bt_scan_devices(devices, 50, 8);
+            if (device_count <= 0) {
+                ERROR_PRINT("No devices found or scan failed");
+                return 1;
+            }
+            
+            display_devices(devices, device_count);
+            
+            if (!source_mac) {
+                char *selected = select_device(devices, device_count, "Select source device (phone)");
+                if (selected == NULL) {
+                    continue;
+                }
+                strncpy(source_selected, selected, sizeof(source_selected) - 1);
+                source_mac = source_selected;
+            }
+            
+            if (!target_mac) {
+                char *selected = select_device(devices, device_count, "Select target device (headphones)");
+                if (selected == NULL) {
+                    continue;
+                }
+                strncpy(target_selected, selected, sizeof(target_selected) - 1);
+                target_mac = target_selected;
+            }
+            
+            break;
         }
     }
     

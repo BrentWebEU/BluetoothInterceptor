@@ -182,3 +182,59 @@ int bt_accept_l2cap(int server_sock, char *client_addr, size_t addr_size) {
     
     return client_sock;
 }
+
+int bt_scan_devices(bt_device_t *devices, int max_devices, int scan_duration) {
+    int dev_id = hci_get_route(NULL);
+    if (dev_id < 0) {
+        ERROR_PRINT("No Bluetooth adapter found");
+        return -1;
+    }
+    
+    int sock = hci_open_dev(dev_id);
+    if (sock < 0) {
+        ERROR_PRINT("Failed to open HCI device");
+        return -1;
+    }
+    
+    INFO_PRINT("Scanning for Bluetooth devices (duration: %d seconds)...", scan_duration);
+    
+    inquiry_info *ii = NULL;
+    int max_rsp = 255;
+    int num_rsp;
+    int flags = IREQ_CACHE_FLUSH;
+    
+    ii = (inquiry_info*)malloc(max_rsp * sizeof(inquiry_info));
+    if (!ii) {
+        ERROR_PRINT("Failed to allocate memory for inquiry");
+        close(sock);
+        return -1;
+    }
+    
+    num_rsp = hci_inquiry(dev_id, scan_duration, max_rsp, NULL, &ii, flags);
+    if (num_rsp < 0) {
+        ERROR_PRINT("HCI inquiry failed");
+        free(ii);
+        close(sock);
+        return -1;
+    }
+    
+    int count = 0;
+    for (int i = 0; i < num_rsp && count < max_devices; i++) {
+        ba2str(&(ii+i)->bdaddr, devices[count].addr);
+        
+        memset(devices[count].name, 0, sizeof(devices[count].name));
+        if (hci_read_remote_name(sock, &(ii+i)->bdaddr, sizeof(devices[count].name), 
+                                 devices[count].name, 0) < 0) {
+            strcpy(devices[count].name, "[Unknown]");
+        }
+        
+        devices[count].rssi = 0;
+        count++;
+    }
+    
+    free(ii);
+    close(sock);
+    
+    INFO_PRINT("Found %d device(s)", count);
+    return count;
+}
