@@ -256,38 +256,6 @@ int main(int argc, char *argv[]) {
         INFO_PRINT("=== Interactive Mode: Device Selection ===");
         printf("\n");
         
-        // Get source device MAC (phone) - manual entry since it won't be paired with us
-        if (!source_mac) {
-            INFO_PRINT("SOURCE DEVICE (Phone):");
-            INFO_PRINT("The phone is paired with the headphones, not with this computer.");
-            INFO_PRINT("You need to find the phone's Bluetooth MAC address manually.");
-            INFO_PRINT("");
-            INFO_PRINT("Ways to find phone MAC address:");
-            INFO_PRINT("  • Android: Settings → About Phone → Status → Bluetooth address");
-            INFO_PRINT("  • iPhone: Settings → General → About → Bluetooth");
-            INFO_PRINT("  • Or check headphones connection history/info");
-            printf("\n");
-            printf("Enter source device MAC address (phone) [format: AA:BB:CC:DD:EE:FF]: ");
-            fflush(stdout);
-            
-            if (fgets(source_selected, sizeof(source_selected), stdin)) {
-                // Remove newline
-                char *newline = strchr(source_selected, '\n');
-                if (newline) *newline = '\0';
-                
-                // Basic validation
-                if (strlen(source_selected) == 17 && 
-                    source_selected[2] == ':' && source_selected[5] == ':') {
-                    source_mac = source_selected;
-                    INFO_PRINT("Source MAC: %s", source_mac);
-                } else {
-                    ERROR_PRINT("Invalid MAC address format");
-                    return 1;
-                }
-            }
-            printf("\n");
-        }
-        
         // Get target device (headphones) from paired devices
         if (!target_mac) {
             INFO_PRINT("TARGET DEVICE (Headphones):");
@@ -301,6 +269,7 @@ int main(int argc, char *argv[]) {
                 INFO_PRINT("");
                 INFO_PRINT("Please pair your headphones with this computer first:");
                 INFO_PRINT("  sudo bluetoothctl");
+                INFO_PRINT("  power on");
                 INFO_PRINT("  scan on");
                 INFO_PRINT("  pair <HEADPHONE_MAC>");
                 INFO_PRINT("  trust <HEADPHONE_MAC>");
@@ -317,6 +286,41 @@ int main(int argc, char *argv[]) {
             }
             strncpy(target_selected, selected, sizeof(target_selected) - 1);
             target_mac = target_selected;
+            printf("\n");
+        }
+        
+        // Get source device MAC (phone) - try auto-discover or manual entry
+        if (!source_mac) {
+            INFO_PRINT("SOURCE DEVICE (Phone):");
+            INFO_PRINT("Attempting to discover the phone's MAC address...");
+            printf("\n");
+            
+            // Try to auto-discover
+            if (bt_discover_source_from_target(target_mac, source_selected, sizeof(source_selected)) == 0) {
+                source_mac = source_selected;
+            } else {
+                // Manual entry fallback
+                INFO_PRINT("Please enter the phone's Bluetooth MAC address manually.");
+                printf("Enter source device MAC address (phone) [format: AA:BB:CC:DD:EE:FF]: ");
+                fflush(stdout);
+                
+                if (fgets(source_selected, sizeof(source_selected), stdin)) {
+                    // Remove newline
+                    char *newline = strchr(source_selected, '\n');
+                    if (newline) *newline = '\0';
+                    
+                    // Basic validation
+                    if (strlen(source_selected) == 17 && 
+                        source_selected[2] == ':' && source_selected[5] == ':') {
+                        source_mac = source_selected;
+                        INFO_PRINT("Source MAC: %s", source_mac);
+                    } else {
+                        ERROR_PRINT("Invalid MAC address format");
+                        return 1;
+                    }
+                }
+            }
+            printf("\n");
         }
     }
     

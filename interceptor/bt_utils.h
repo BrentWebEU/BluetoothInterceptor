@@ -25,5 +25,6 @@ int bt_auto_pair_device(const char *device_mac);
 int bt_disconnect_device(const char *device_mac);
 int bt_force_disconnect(const char *source_mac, const char *target_mac);
 int bt_check_connection_status(const char *device_mac);
+int bt_discover_source_from_target(const char *target_mac, char *source_mac_out, size_t size);
 
 #endif

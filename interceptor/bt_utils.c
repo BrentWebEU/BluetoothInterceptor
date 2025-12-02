@@ -500,3 +500,81 @@ int bt_auto_pair_device(const char *device_mac) {
     INFO_PRINT("Auto-pairing completed");
     return 0;
 }
+
+int bt_discover_source_from_target(const char *target_mac, char *source_mac_out, size_t size) {
+    char cmd[512];
+    FILE *fp;
+    char line[512];
+    int found = 0;
+    
+    INFO_PRINT("=== Discovering Source Device (Phone) ===");
+    INFO_PRINT("Monitoring Bluetooth connections to target: %s", target_mac);
+    INFO_PRINT("");
+    INFO_PRINT("Please ensure the phone is connected to the headphones now.");
+    INFO_PRINT("Checking connection information...");
+    printf("\n");
+    
+    // Method 1: Check bluetoothctl info for connected device
+    snprintf(cmd, sizeof(cmd), 
+        "echo -e 'info %s\\nquit' | bluetoothctl 2>&1",
+        target_mac);
+    
+    fp = popen(cmd, "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            DEBUG_PRINT("bluetoothctl: %s", line);
+        }
+        pclose(fp);
+    }
+    
+    // Method 2: Monitor for active connection attempts
+    INFO_PRINT("Method 1: Monitoring for incoming Bluetooth connections...");
+    INFO_PRINT("Waiting 10 seconds for phone to connect to headphones...");
+    INFO_PRINT("(You may need to disconnect and reconnect the phone to headphones)");
+    printf("\n");
+    
+    // Monitor bluetoothctl for connection events
+    snprintf(cmd, sizeof(cmd),
+        "timeout 10 bluetoothctl 2>&1 | grep -i 'device\\|connected\\|%s' || true",
+        target_mac);
+    
+    fp = popen(cmd, "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            INFO_PRINT("Monitor: %s", line);
+            // Try to extract MAC addresses from connection logs
+            if (strstr(line, "Device") && strstr(line, "Connected: yes")) {
+                char *mac_start = strstr(line, "Device ") + 7;
+                if (mac_start) {
+                    char extracted_mac[18];
+                    if (sscanf(mac_start, "%17s", extracted_mac) == 1) {
+                        // Check if it's not the target MAC (headphones)
+                        if (strcasecmp(extracted_mac, target_mac) != 0) {
+                            strncpy(source_mac_out, extracted_mac, size - 1);
+                            source_mac_out[size - 1] = '\0';
+                            found = 1;
+                            INFO_PRINT("✓ Discovered source device: %s", source_mac_out);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        pclose(fp);
+    }
+    
+    if (!found) {
+        INFO_PRINT("");
+        INFO_PRINT("Could not auto-discover phone MAC address.");
+        INFO_PRINT("");
+        INFO_PRINT("Manual options to find phone MAC:");
+        INFO_PRINT("  1. Android: Settings → About Phone → Status → Bluetooth address");
+        INFO_PRINT("  2. iPhone: Settings → General → About → Bluetooth");
+        INFO_PRINT("  3. Check headphones' app for connected device info");
+        INFO_PRINT("  4. Use 'hcitool con' while phone is connected");
+        printf("\n");
+        return -1;
+    }
+    
+    return 0;
+}
