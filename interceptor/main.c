@@ -24,8 +24,11 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  -t <target_mac>    Target device MAC address (headphones)\n");
     fprintf(stderr, "  -p <psm>           L2CAP PSM (default: 25 for A2DP)\n");
     fprintf(stderr, "  -P <port>          TCP server port (default: %d)\n", TCP_SERVER_PORT);
-    fprintf(stderr, "  -S                 Scan for nearby Bluetooth devices\n");
+    fprintf(stderr, "  -S                 Show paired/connected devices (interactive mode)\n");
     fprintf(stderr, "  -h                 Show this help\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Interactive mode lists all paired devices, including connected ones.\n");
+    fprintf(stderr, "The interceptor will disconnect connected devices before MITM setup.\n");
 }
 
 void display_devices(bt_device_t *devices, int count) {
@@ -253,10 +256,21 @@ int main(int argc, char *argv[]) {
         char source_selected[18] = {0};
         char target_selected[18] = {0};
         
+        INFO_PRINT("=== Interactive Mode: Listing Paired/Connected Devices ===");
+        INFO_PRINT("This will show all devices paired with this computer");
+        INFO_PRINT("Including devices currently connected to other devices");
+        printf("\n");
+        
         while (1) {
             device_count = bt_scan_devices(devices, 50, 8);
             if (device_count <= 0) {
-                ERROR_PRINT("No devices found or scan failed");
+                ERROR_PRINT("No paired devices found");
+                INFO_PRINT("Please pair your devices first using:");
+                INFO_PRINT("  sudo bluetoothctl");
+                INFO_PRINT("  scan on");
+                INFO_PRINT("  pair <DEVICE_MAC>");
+                INFO_PRINT("  trust <DEVICE_MAC>");
+                INFO_PRINT("  quit");
                 return 1;
             }
             
