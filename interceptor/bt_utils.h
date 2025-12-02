@@ -21,6 +21,7 @@ int bt_bind_l2cap(int sock, const char *src_addr, uint16_t psm);
 int bt_listen_l2cap(int sock, int backlog);
 int bt_accept_l2cap(int server_sock, char *client_addr, size_t addr_size);
 int bt_scan_devices(bt_device_t *devices, int max_devices, int scan_duration);
+int bt_scan_active_connections(bt_device_t *devices, int max_devices);
 int bt_auto_pair_device(const char *device_mac);
 int bt_disconnect_device(const char *device_mac);
 int bt_force_disconnect(const char *source_mac, const char *target_mac);

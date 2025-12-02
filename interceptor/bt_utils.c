@@ -183,67 +183,74 @@ int bt_accept_l2cap(int server_sock, char *client_addr, size_t addr_size) {
     return client_sock;
 }
 
-int bt_scan_devices(bt_device_t *devices, int max_devices, int scan_duration) {
-    INFO_PRINT("Listing paired and connected Bluetooth devices...");
+int bt_scan_active_connections(bt_device_t *devices, int max_devices) {
+    INFO_PRINT("Scanning for active Bluetooth connections in the area...");
     
-    // Use bluetoothctl to list devices (both paired and connected)
-    FILE *fp = popen("bluetoothctl devices 2>&1", "r");
-    if (!fp) {
-        ERROR_PRINT("Failed to run bluetoothctl");
-        return -1;
-    }
-    
+    FILE *fp;
     char line[512];
     int count = 0;
     
-    // Parse output: "Device AA:BB:CC:DD:EE:FF Device Name"
-    while (fgets(line, sizeof(line), fp) && count < max_devices) {
-        if (strncmp(line, "Device ", 7) != 0) {
-            continue;
+    // Method 1: Use hcitool to scan for active connections
+    fp = popen("timeout 5 hcitool scan 2>&1", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp) && count < max_devices) {
+            // Parse: "AA:BB:CC:DD:EE:FF	Device Name"
+            char mac[18], name[248];
+            if (sscanf(line, "%17s %247[^\n]", mac, name) == 2) {
+                if (strlen(mac) == 17 && strchr(mac, ':')) {
+                    strncpy(devices[count].addr, mac, sizeof(devices[count].addr) - 1);
+                    strncpy(devices[count].name, name, sizeof(devices[count].name) - 1);
+                    devices[count].connected = 0;  // Will check later
+                    devices[count].rssi = 0;
+                    count++;
+                }
+            }
         }
-        
-        char *mac_start = line + 7;
-        char *space = strchr(mac_start, ' ');
-        if (!space) {
-            continue;
-        }
-        
-        // Extract MAC address
-        int mac_len = space - mac_start;
-        if (mac_len >= sizeof(devices[count].addr)) {
-            continue;
-        }
-        
-        strncpy(devices[count].addr, mac_start, mac_len);
-        devices[count].addr[mac_len] = '\0';
-        
-        // Extract device name
-        char *name_start = space + 1;
-        char *newline = strchr(name_start, '\n');
-        if (newline) {
-            *newline = '\0';
-        }
-        strncpy(devices[count].name, name_start, sizeof(devices[count].name) - 1);
-        devices[count].name[sizeof(devices[count].name) - 1] = '\0';
-        
-        // Check if connected
-        devices[count].connected = bt_check_connection_status(devices[count].addr);
-        devices[count].rssi = 0;
-        
-        count++;
+        pclose(fp);
     }
     
-    pclose(fp);
-    
-    if (count == 0) {
-        INFO_PRINT("No paired devices found");
-        INFO_PRINT("To pair devices, use: bluetoothctl");
-    } else {
-        INFO_PRINT("Found %d paired/connected device(s)", count);
+    // Method 2: Check for devices currently in connection state
+    fp = popen("hcitool con 2>&1", "r");
+    if (fp) {
+        INFO_PRINT("Active connections found:");
+        while (fgets(line, sizeof(line), fp)) {
+            printf("  %s", line);
+            // Parse connection info to mark devices as connected
+            // Format: "> ACL AA:BB:CC:DD:EE:FF handle 123 state 1 lm MASTER"
+            if (strstr(line, "ACL") || strstr(line, "SCO")) {
+                char mac[18];
+                if (sscanf(line, "%*s %17s", mac) == 1) {
+                    // Mark this device as connected
+                    for (int i = 0; i < count; i++) {
+                        if (strcasecmp(devices[i].addr, mac) == 0) {
+                            devices[i].connected = 1;
+                        }
+                    }
+                    // Add if not already in list
+                    int found = 0;
+                    for (int i = 0; i < count; i++) {
+                        if (strcasecmp(devices[i].addr, mac) == 0) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found && count < max_devices) {
+                        strncpy(devices[count].addr, mac, sizeof(devices[count].addr) - 1);
+                        strcpy(devices[count].name, "[Active Connection]");
+                        devices[count].connected = 1;
+                        devices[count].rssi = 0;
+                        count++;
+                    }
+                }
+            }
+        }
+        pclose(fp);
     }
     
+    INFO_PRINT("Found %d Bluetooth device(s)", count);
     return count;
 }
+
 
 
 int bt_check_connection_status(const char *device_mac) {

