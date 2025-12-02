@@ -37,12 +37,13 @@ void display_devices(bt_device_t *devices, int count) {
     printf("  #  │  MAC Address       │  Status      │  Device Name\n");
     printf("═══════════════════════════════════════════════════════════════════════════\n");
     for (int i = 0; i < count; i++) {
-        const char *status = devices[i].connected ? "CONNECTED  " : "Available  ";
+        const char *status = devices[i].connected ? "CONNECTED  " : "Paired     ";
         printf(" %2d  │  %s  │  %s │  %s\n", 
                i + 1, devices[i].addr, status, devices[i].name);
     }
     printf("═══════════════════════════════════════════════════════════════════════════\n");
-    printf("Note: CONNECTED devices will be forcibly disconnected during MITM setup\n");
+    printf("These devices are paired with this computer.\n");
+    printf("CONNECTED devices will be disconnected during MITM setup.\n");
     printf("═══════════════════════════════════════════════════════════════════════════\n");
     printf("\n");
 }
@@ -50,17 +51,13 @@ void display_devices(bt_device_t *devices, int count) {
 char* select_device(bt_device_t *devices, int count, const char *prompt) {
     int choice;
     while (1) {
-        printf("%s (1-%d, 0 to rescan): ", prompt, count);
+        printf("%s (1-%d): ", prompt, count);
         if (scanf("%d", &choice) != 1) {
             while (getchar() != '\n');
             printf("Invalid input. Please enter a number.\n");
             continue;
         }
         while (getchar() != '\n');
-        
-        if (choice == 0) {
-            return NULL;
-        }
         
         if (choice >= 1 && choice <= count) {
             return devices[choice - 1].addr;
@@ -256,45 +253,70 @@ int main(int argc, char *argv[]) {
         char source_selected[18] = {0};
         char target_selected[18] = {0};
         
-        INFO_PRINT("=== Interactive Mode: Listing Paired/Connected Devices ===");
-        INFO_PRINT("This will show all devices paired with this computer");
-        INFO_PRINT("Including devices currently connected to other devices");
+        INFO_PRINT("=== Interactive Mode: Device Selection ===");
         printf("\n");
         
-        while (1) {
+        // Get source device MAC (phone) - manual entry since it won't be paired with us
+        if (!source_mac) {
+            INFO_PRINT("SOURCE DEVICE (Phone):");
+            INFO_PRINT("The phone is paired with the headphones, not with this computer.");
+            INFO_PRINT("You need to find the phone's Bluetooth MAC address manually.");
+            INFO_PRINT("");
+            INFO_PRINT("Ways to find phone MAC address:");
+            INFO_PRINT("  • Android: Settings → About Phone → Status → Bluetooth address");
+            INFO_PRINT("  • iPhone: Settings → General → About → Bluetooth");
+            INFO_PRINT("  • Or check headphones connection history/info");
+            printf("\n");
+            printf("Enter source device MAC address (phone) [format: AA:BB:CC:DD:EE:FF]: ");
+            fflush(stdout);
+            
+            if (fgets(source_selected, sizeof(source_selected), stdin)) {
+                // Remove newline
+                char *newline = strchr(source_selected, '\n');
+                if (newline) *newline = '\0';
+                
+                // Basic validation
+                if (strlen(source_selected) == 17 && 
+                    source_selected[2] == ':' && source_selected[5] == ':') {
+                    source_mac = source_selected;
+                    INFO_PRINT("Source MAC: %s", source_mac);
+                } else {
+                    ERROR_PRINT("Invalid MAC address format");
+                    return 1;
+                }
+            }
+            printf("\n");
+        }
+        
+        // Get target device (headphones) from paired devices
+        if (!target_mac) {
+            INFO_PRINT("TARGET DEVICE (Headphones):");
+            INFO_PRINT("Listing devices paired with this computer...");
+            INFO_PRINT("The headphones must be paired with this computer for MITM to work.");
+            printf("\n");
+            
             device_count = bt_scan_devices(devices, 50, 8);
             if (device_count <= 0) {
                 ERROR_PRINT("No paired devices found");
-                INFO_PRINT("Please pair your devices first using:");
+                INFO_PRINT("");
+                INFO_PRINT("Please pair your headphones with this computer first:");
                 INFO_PRINT("  sudo bluetoothctl");
                 INFO_PRINT("  scan on");
-                INFO_PRINT("  pair <DEVICE_MAC>");
-                INFO_PRINT("  trust <DEVICE_MAC>");
+                INFO_PRINT("  pair <HEADPHONE_MAC>");
+                INFO_PRINT("  trust <HEADPHONE_MAC>");
                 INFO_PRINT("  quit");
                 return 1;
             }
             
             display_devices(devices, device_count);
             
-            if (!source_mac) {
-                char *selected = select_device(devices, device_count, "Select source device (phone)");
-                if (selected == NULL) {
-                    continue;
-                }
-                strncpy(source_selected, selected, sizeof(source_selected) - 1);
-                source_mac = source_selected;
+            char *selected = select_device(devices, device_count, "Select target device (headphones)");
+            if (selected == NULL) {
+                ERROR_PRINT("No device selected");
+                return 1;
             }
-            
-            if (!target_mac) {
-                char *selected = select_device(devices, device_count, "Select target device (headphones)");
-                if (selected == NULL) {
-                    continue;
-                }
-                strncpy(target_selected, selected, sizeof(target_selected) - 1);
-                target_mac = target_selected;
-            }
-            
-            break;
+            strncpy(target_selected, selected, sizeof(target_selected) - 1);
+            target_mac = target_selected;
         }
     }
     
