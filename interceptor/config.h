@@ -15,6 +15,7 @@
 #endif
 
 #define ERROR_PRINT(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
+#define WARN_PRINT(fmt, ...) fprintf(stdout, "[WARN] " fmt "\n", ##__VA_ARGS__)
 #define INFO_PRINT(fmt, ...) fprintf(stdout, "[INFO] " fmt "\n", ##__VA_ARGS__)
 
 #endif
