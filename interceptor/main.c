@@ -297,7 +297,7 @@ int main(int argc, char *argv[]) {
     
     if (bt_auto_pair_device(target_mac) < 0) {
         ERROR_PRINT("Auto-pairing failed");
-        INFO_PRINT("You can try manual pairing:");
+        INFO_PRINT("You must manually pair with the device:");
         INFO_PRINT("  sudo bluetoothctl");
         INFO_PRINT("  scan on");
         INFO_PRINT("  pair %s", target_mac);
@@ -306,11 +306,26 @@ int main(int argc, char *argv[]) {
         INFO_PRINT("  quit");
         INFO_PRINT("Press Enter to continue after manual pairing...");
         getchar();
+        
+        // Verify pairing was successful before continuing
+        INFO_PRINT("Verifying pairing status...");
+        char verify_cmd[256];
+        snprintf(verify_cmd, sizeof(verify_cmd), 
+            "echo -e 'info %s\\nquit' | bluetoothctl 2>&1 | grep -q 'Paired: yes'", 
+            target_mac);
+        if (system(verify_cmd) != 0) {
+            ERROR_PRINT("Device is not paired. Please complete pairing before continuing.");
+            return 1;
+        }
+        INFO_PRINT("Pairing verified successfully");
     }
     
+    INFO_PRINT("Step 4: Extracting link key");
     char link_key[64];
     if (bt_extract_link_key(adapter_mac, target_mac, link_key, sizeof(link_key)) < 0) {
         ERROR_PRINT("Failed to extract link key");
+        ERROR_PRINT("Make sure the device is paired and the info file exists at:");
+        ERROR_PRINT("  %s/%s/%s/info", BLUETOOTH_INFO_PATH, adapter_mac, target_mac);
         return 1;
     }
     
@@ -318,14 +333,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    INFO_PRINT("Step 3: Creating TCP server");
+    INFO_PRINT("Step 5: Creating TCP server");
     int tcp_server = tcp_create_server(tcp_port);
     if (tcp_server < 0) {
         return 1;
     }
     int tcp_client = -1;
     
-    INFO_PRINT("Step 4: Setting up Bluetooth relay");
+    INFO_PRINT("Step 6: Setting up Bluetooth relay");
     
     int phone_sock = bt_create_l2cap_socket();
     if (phone_sock < 0) {
