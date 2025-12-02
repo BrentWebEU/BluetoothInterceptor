@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <errno.h>
 
 static volatile int running = 1;
@@ -366,14 +368,6 @@ int main(int argc, char *argv[]) {
     printf("\n");
     
     INFO_PRINT("Step 4: Create TCP server for data streaming");
-    
-    if (crypto_init_link_key(link_key) < 0) {
-        return 1;
-    }
-    INFO_PRINT("✓ Crypto initialized");
-    printf("\n");
-    
-    INFO_PRINT("Step 4: Creating TCP server for data streaming");
     int tcp_server = tcp_create_server(tcp_port);
     if (tcp_server < 0) {
         return 1;
