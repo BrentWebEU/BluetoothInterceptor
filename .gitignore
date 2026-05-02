@@ -1,0 +1,14 @@
+# C variant (outdated, not in use)
+interceptor/
+
+# Rust build artifacts
+btintercept/target/
+
+# Client dependencies
+client/node_modules/
+client/.expo/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
