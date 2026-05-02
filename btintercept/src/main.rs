@@ -7,11 +7,10 @@ use std::io::{self, BufRead, Write};
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 
 use libc::c_int;
 
-use bt_utils::BtDevice;
+use bt_utils::{BtDevice, DevicePair, classify_cod, DeviceType};
 use config::MAX_BUFFER_SIZE;
 
 // ── Signal handling ──────────────────────────────────────────────────────────
@@ -52,126 +51,63 @@ fn print_usage(prog: &str) {
     eprintln!("      The MITM computer acts as a transparent relay.");
 }
 
-fn display_devices(devices: &[BtDevice]) {
+fn device_label(d: &BtDevice) -> String {
+    let icon = d.cod.as_deref().map(classify_cod).unwrap_or(DeviceType::Other).icon();
+    format!("{} {} ({})", icon, d.name, d.addr)
+}
+
+fn display_pairs(pairs: &[DevicePair]) {
     println!();
-    println!("═══════════════════════════════════════════════════════════════════════════");
-    println!("  #  │  MAC Address       │  Status      │  Device Name");
-    println!("═══════════════════════════════════════════════════════════════════════════");
-    for (i, d) in devices.iter().enumerate() {
-        let status = if d.connected { "CONNECTED  " } else { "Paired     " };
-        println!(" {:2}  │  {}  │  {} │  {}", i + 1, d.addr, status, d.name);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Detected Bluetooth connections");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    for (i, pair) in pairs.iter().enumerate() {
+        let source_str = match &pair.source {
+            Some(s) => device_label(s),
+            None    => "unknown source".to_string(),
+        };
+        println!(" {:2}  {}  ↔  {}", i + 1, device_label(&pair.target), source_str);
     }
-    println!("═══════════════════════════════════════════════════════════════════════════");
-    println!("These devices are paired with this computer.");
-    println!("CONNECTED devices will be disconnected during MITM setup.");
-    println!("═══════════════════════════════════════════════════════════════════════════");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
 }
 
-fn select_device(devices: &[BtDevice], prompt: &str) -> Option<String> {
+/// Scan, detect pairs, present them to the user and return (target_mac, source_mac).
+fn select_pair_interactive() -> Option<(String, Option<String>)> {
+    let pairs = bt_utils::bt_find_connected_pairs();
+
+    if pairs.is_empty() {
+        error_print!("No Bluetooth devices found nearby.");
+        info_print!("Make sure the target device is powered on and in range.");
+        return None;
+    }
+
+    display_pairs(&pairs);
+
+    // Stdin reader.
     let stdin = io::stdin();
     loop {
-        print!("{} (1-{}): ", prompt, devices.len());
+        print!("Select a connection to intercept (1-{}): ", pairs.len());
         io::stdout().flush().unwrap();
         let mut line = String::new();
         if stdin.lock().read_line(&mut line).is_err() {
             return None;
         }
-        match line.trim().parse::<usize>() {
-            Ok(n) if n >= 1 && n <= devices.len() => return Some(devices[n - 1].addr.clone()),
-            _ => println!("Invalid choice. Please select a number between 1 and {}.", devices.len()),
+        let input = line.trim();
+        if input.is_empty() {
+            display_pairs(&pairs);
+            continue;
         }
-    }
-}
-
-/// Interactive device selection with live scanning.
-///
-/// Starts a `LiveScanner` in the background, refreshes the device table
-/// whenever new devices are discovered, and waits for the user to type a
-/// number.  Pressing Enter without a number forces an immediate redisplay.
-fn select_device_live(prompt: &str) -> Option<String> {
-    info_print!("Starting live Bluetooth scan — devices will appear as they are discovered.");
-    info_print!("Press Enter at any time to refresh the list.");
-    println!();
-
-    let scanner = bt_utils::LiveScanner::start();
-
-    // Give the initial poll a moment to complete before showing anything.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-
-    // Spawn a thread to read stdin without blocking the display loop.
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let stdin = io::stdin();
-        loop {
-            let mut line = String::new();
-            match stdin.lock().read_line(&mut line) {
-                Ok(0) | Err(_) => break, // EOF or error
-                Ok(_) => {
-                    if tx.send(line.trim().to_string()).is_err() {
-                        break;
-                    }
-                }
+        match input.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= pairs.len() => {
+                let pair = &pairs[n - 1];
+                return Some((
+                    pair.target.addr.clone(),
+                    pair.source.as_ref().map(|s| s.addr.clone()),
+                ));
             }
+            _ => println!("Invalid — enter a number between 1 and {}.", pairs.len()),
         }
-    });
-
-    let mut last_count = usize::MAX; // force first display
-    let mut last_refresh = std::time::Instant::now();
-
-    loop {
-        let devices = scanner.devices.lock().unwrap().clone();
-        let count = devices.len();
-
-        // Redisplay when device count changes or after 5 s idle.
-        let needs_redisplay = count != last_count
-            || last_refresh.elapsed() >= std::time::Duration::from_secs(5);
-
-        if needs_redisplay {
-            if last_count != usize::MAX && count != last_count {
-                println!("\n[INFO] Device list updated — {} device(s) found", count);
-            }
-            display_devices(&devices);
-            last_count = count;
-            last_refresh = std::time::Instant::now();
-            if count > 0 {
-                print!("{} (1-{}): ", prompt, count);
-            } else {
-                print!("Scanning… press Enter to check: ");
-            }
-            io::stdout().flush().unwrap();
-        }
-
-        match rx.try_recv() {
-            Ok(input) => {
-                if input.is_empty() {
-                    // Force immediate redisplay on bare Enter.
-                    last_count = usize::MAX;
-                    continue;
-                }
-                let devices = scanner.devices.lock().unwrap().clone();
-                if devices.is_empty() {
-                    println!("No devices found yet — still scanning.");
-                    print!("Press Enter to check again: ");
-                    io::stdout().flush().unwrap();
-                    continue;
-                }
-                match input.parse::<usize>() {
-                    Ok(n) if n >= 1 && n <= devices.len() => {
-                        return Some(devices[n - 1].addr.clone());
-                    }
-                    _ => {
-                        println!("Invalid choice. Please select 1–{}.", devices.len());
-                        print!("{} (1-{}): ", prompt, devices.len());
-                        io::stdout().flush().unwrap();
-                    }
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => return None,
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -336,6 +272,7 @@ fn main() {
     let prog = &args[0];
 
     let mut target_mac: Option<String> = None;
+    let mut source_mac: Option<String> = None;
     let mut psm: u16 = 25;
     let mut tcp_port: u16 = config::TCP_SERVER_PORT;
     let mut scan_mode = false;
@@ -374,52 +311,16 @@ fn main() {
 
     // ── Interactive / scan mode ──────────────────────────────────────────────
     if target_mac.is_none() || scan_mode {
-        info_print!("═══════════════════════════════════════════════════════");
-        info_print!("   Bluetooth MITM Interceptor - Discovery Mode");
-        info_print!("═══════════════════════════════════════════════════════");
-        info_print!("");
-        info_print!("This tool will:");
-        info_print!("  1. Scan for active Bluetooth connections");
-        info_print!("  2. Force disconnect the target device");
-        info_print!("  3. Spoof target's MAC and intercept reconnection");
-        info_print!("  4. Act as MITM and log all packets");
-        info_print!("");
-        info_print!("═══════════════════════════════════════════════════════");
-        println!();
-
         if target_mac.is_none() {
-            // Live interactive selection: scan runs in the background and the
-            // device table is refreshed automatically as new devices appear.
-            info_print!("Select the TARGET device to intercept (usually headphones):");
-            info_print!("This is the device the phone is connected to.");
-            println!();
-
-            match select_device_live("Select target device") {
-                Some(mac) => target_mac = Some(mac),
-                None => {
-                    error_print!("No device selected");
-                    std::process::exit(1);
-                }
+            match select_pair_interactive() {
+                Some((t, s)) => { target_mac = Some(t); source_mac = s; }
+                None => std::process::exit(1),
             }
-        } else {
-            // -S flag with -t already given: just show a snapshot of nearby devices.
-            info_print!("Scanning for Bluetooth devices and active connections...");
-            println!();
-
-            let devices = bt_utils::bt_scan_active_connections(50);
-            if devices.is_empty() {
-                error_print!("No Bluetooth devices found in the area");
-                info_print!("");
-                info_print!("Make sure:");
-                info_print!("  - Target devices (phone + headphones) are nearby");
-                info_print!("  - They are currently connected to each other");
-                info_print!("  - Bluetooth adapter is powered on");
-                std::process::exit(1);
-            }
-            display_devices(&devices);
         }
-
-        info_print!("✓ Target device selected: {}", target_mac.as_deref().unwrap_or("?"));
+        info_print!("✓ Target: {}", target_mac.as_deref().unwrap_or("?"));
+        if let Some(ref s) = source_mac {
+            info_print!("  Source: {}", s);
+        }
         println!();
     }
 
@@ -436,9 +337,12 @@ fn main() {
     info_print!("═══════════════════════════════════════════════════════");
     info_print!("   Bluetooth MITM Attack - Active Mode");
     info_print!("═══════════════════════════════════════════════════════");
-    info_print!("Target device:  {}", target_mac);
-    info_print!("L2CAP PSM:      {}", psm);
-    info_print!("TCP Port:       {}", tcp_port);
+    info_print!("Target:   {}", target_mac);
+    if let Some(ref s) = source_mac {
+        info_print!("Source:   {}", s);
+    }
+    info_print!("PSM:      {}", psm);
+    info_print!("TCP port: {}", tcp_port);
     info_print!("═══════════════════════════════════════════════════════");
     println!();
 
